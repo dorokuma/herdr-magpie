@@ -1,0 +1,9 @@
+gpui-kit.d.ts
+herdr.d.ts
+*.bak*
+*.error
+*.reset-*
+*.old-*
+mods/routing/config.json
+layouts/.state/
+.DS_Store

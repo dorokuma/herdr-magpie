@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200">
+  <rect width="320" height="200" fill="#16181d"/>
+  <!-- Left Sidebar -->
+  <rect x="0" y="0" width="58" height="200" fill="#131519"/>
+  <line x1="58" y1="0" x2="58" y2="200" stroke="#262930" stroke-width="1.5"/>
+  <rect x="10" y="14" width="34" height="6" rx="3" fill="#4e535d"/>
+  <rect x="10" y="28" width="26" height="5" rx="2.5" fill="#383c45"/>
+  <rect x="10" y="40" width="38" height="5" rx="2.5" fill="#4e535d"/>
+  <rect x="10" y="52" width="22" height="5" rx="2.5" fill="#383c45"/>
+  <circle cx="13" cy="84" r="3" fill="#34d399"/>
+  <rect x="21" y="81.5" width="26" height="5" rx="2.5" fill="#4e535d"/>
+  <circle cx="13" cy="98" r="3" fill="#facc15"/>
+  <rect x="21" y="95.5" width="22" height="5" rx="2.5" fill="#383c45"/>
+
+  <!-- Top Tab Bar -->
+  <rect x="59" y="0" width="261" height="26" fill="#131519"/>
+  <line x1="59" y1="26" x2="320" y2="26" stroke="#262930" stroke-width="1.5"/>
+  <rect x="66" y="6" width="38" height="14" rx="4" fill="#262a32" stroke="#363b46" stroke-width="1"/>
+  <rect x="108" y="6" width="30" height="14" rx="4" fill="#1c1f26"/>
+  <!-- Active Routing Pill on Top Right -->
+  <rect x="234" y="6" width="44" height="14" rx="4" fill="#2c3545" stroke="#5e95d7" stroke-width="1"/>
+  <circle cx="242" cy="13" r="1.8" fill="#8ab4f8"/>
+  <circle cx="249" cy="10.5" r="1.5" fill="#8ab4f8"/>
+  <circle cx="249" cy="15.5" r="1.5" fill="#8ab4f8"/>
+  <rect x="254" y="11" width="19" height="4" rx="2" fill="#c9d6ea"/>
+  <rect x="282" y="6" width="30" height="14" rx="4" fill="#1c1f26"/>
+
+  <!-- Center Terminal Pane -->
+  <rect x="66" y="33" width="122" height="159" rx="6" fill="#101216" stroke="#262930" stroke-width="1.5"/>
+  <line x1="66" y1="48" x2="188" y2="48" stroke="#1e2128" stroke-width="1"/>
+  <circle cx="75" cy="40.5" r="2.5" fill="#5aa66c"/>
+  <rect x="82" y="38.5" width="28" height="4" rx="2" fill="#4b505b"/>
+  <rect x="75" y="58" width="64" height="4" rx="2" fill="#323741"/>
+  <rect x="75" y="68" width="92" height="4" rx="2" fill="#272b33"/>
+  <rect x="75" y="78" width="78" height="4" rx="2" fill="#272b33"/>
+  <rect x="75" y="94" width="52" height="4" rx="2" fill="#3b4250"/>
+  <rect x="75" y="104" width="84" height="4" rx="2" fill="#272b33"/>
+
+  <!-- Right Magpie Routing Panel -->
+  <rect x="194" y="33" width="119" height="159" rx="6" fill="#15181e" stroke="#2b303b" stroke-width="1.5"/>
+  <!-- Stage Card -->
+  <rect x="200" y="40" width="107" height="72" rx="5" fill="#0f1115" stroke="#232730" stroke-width="1"/>
+  <!-- Left Agent Pills -->
+  <rect x="205" y="47" width="28" height="13" rx="6.5" fill="#171a20" stroke="#2e333e" stroke-width="1"/>
+  <circle cx="211" cy="53.5" r="2.2" fill="#bd8638"/>
+  <rect x="216" y="52" width="11" height="3" rx="1.5" fill="#9ca3af"/>
+
+  <rect x="205" y="66" width="28" height="13" rx="6.5" fill="#171a20" stroke="#2e333e" stroke-width="1"/>
+  <circle cx="211" cy="72.5" r="2.2" fill="#5aa66c"/>
+  <rect x="216" y="71" width="9" height="3" rx="1.5" fill="#9ca3af"/>
+
+  <rect x="205" y="85" width="28" height="13" rx="6.5" fill="#171a20" stroke="#2e333e" stroke-width="1"/>
+  <circle cx="211" cy="91.5" r="2.2" fill="#2e9fc9"/>
+  <rect x="216" y="90" width="11" height="3" rx="1.5" fill="#9ca3af"/>
+
+  <!-- Right Account Pills -->
+  <rect x="262" y="45" width="40" height="12" rx="6" fill="#1d2129" stroke="#3b4252" stroke-width="1"/>
+  <circle cx="268" cy="51" r="2" fill="#d4b06a"/>
+  <rect x="273" y="49.5" width="22" height="3" rx="1.5" fill="#d1d5db"/>
+
+  <rect x="262" y="61" width="40" height="12" rx="6" fill="#15181e" stroke="#282c35" stroke-width="1"/>
+  <circle cx="268" cy="67" r="2" fill="#8a6d3f"/>
+  <rect x="273" y="65.5" width="20" height="3" rx="1.5" fill="#6b7280"/>
+
+  <rect x="262" y="77" width="40" height="12" rx="6" fill="#1d2129" stroke="#3b4252" stroke-width="1"/>
+  <circle cx="268" cy="83" r="2" fill="#d4b06a"/>
+  <rect x="273" y="81.5" width="23" height="3" rx="1.5" fill="#d1d5db"/>
+
+  <rect x="262" y="93" width="40" height="12" rx="6" fill="#1d2129" stroke="#3b4252" stroke-width="1"/>
+  <circle cx="268" cy="99" r="2" fill="#d4b06a"/>
+  <rect x="273" y="97.5" width="18" height="3" rx="1.5" fill="#d1d5db"/>
+
+  <!-- S-Curve Bezier Wires -->
+  <path d="M 235 53.5 C 248 53.5, 248 83, 260 83" fill="none" stroke="#bd8638" stroke-width="2" stroke-linecap="round"/>
+  <path d="M 235 72.5 C 248 72.5, 248 51, 260 51" fill="none" stroke="#5aa66c" stroke-width="2" stroke-linecap="round"/>
+  <path d="M 235 91.5 C 248 91.5, 248 99, 260 99" fill="none" stroke="#2e9fc9" stroke-width="1.8" stroke-linecap="round" opacity="0.85"/>
+
+  <!-- Agent Quota Card -->
+  <rect x="200" y="117" width="107" height="27" rx="5" fill="#0f1115" stroke="#232730" stroke-width="1"/>
+  <rect x="206" y="123" width="32" height="3.5" rx="1.75" fill="#6b7280"/>
+  <rect x="206" y="132" width="42" height="3.5" rx="1.75" fill="#34d399"/>
+  <rect x="254" y="132" width="36" height="3.5" rx="1.75" fill="#d4b06a"/>
+
+  <!-- Request Rows -->
+  <circle cx="205" cy="155" r="2.2" fill="#facc15"/>
+  <rect x="211" y="153.5" width="52" height="3.5" rx="1.75" fill="#9ca3af"/>
+  <rect x="278" y="153.5" width="24" height="3.5" rx="1.75" fill="#4b5563"/>
+
+  <circle cx="205" cy="168" r="2.2" fill="#34d399"/>
+  <rect x="211" y="166.5" width="60" height="3.5" rx="1.75" fill="#6b7280"/>
+  <rect x="278" y="166.5" width="24" height="3.5" rx="1.75" fill="#374151"/>
+
+  <circle cx="205" cy="181" r="2.2" fill="#34d399"/>
+  <rect x="211" y="179.5" width="46" height="3.5" rx="1.75" fill="#6b7280"/>
+  <rect x="278" y="179.5" width="24" height="3.5" rx="1.75" fill="#374151"/>
+</svg>
