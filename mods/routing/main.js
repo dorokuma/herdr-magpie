@@ -153,13 +153,16 @@ export default class Routing extends View {
     this.quotaBusy = false;
     this.traceBusy = false;
     this.lastSecTick = 0;
+    this.demo = false; // config.json's "demo": renders mods/routing/demo.json, asks no gateway
 
     cx.spawn(async (cx) => {
       await this.initTarget(cx);
+      if (this.demo) return; // a demo stage is still: no polling, no frame timer
       cx.spawn(async (cx2) => this.poll(cx2));
       cx.spawn(async (cx2) => this.pollQuota(cx2));
     });
     cx.timer.every(FRAME, (cx) => {
+      if (this.demo) return;
       const now = Date.now();
       let changed = false;
       for (const [id, f] of this.flights) {
@@ -185,18 +188,85 @@ export default class Routing extends View {
   }
 
   async initTarget(cx) {
+    let cfg = null;
     try {
       const raw = await readTextFile(`${appHome()}/mods/routing/config.json`);
       if (raw) {
-        const cfg = JSON.parse(raw);
+        cfg = JSON.parse(raw);
         if (cfg.remote !== undefined) this.remote = cfg.remote || null;
         if (cfg.baseUrl) this.baseUrl = String(cfg.baseUrl).replace(/\/$/, "");
         if (cfg.label) this.remoteLabel = String(cfg.label);
         else if (this.remote) this.remoteLabel = `${this.remote} · ${this.baseUrl.replace(/^https?:\/\//, "")}`;
       }
     } catch (_) { /* optional config.json */ }
+    if (cfg?.demo) {
+      this.demo = true;
+      await this.loadDemo(cx);
+      return;
+    }
     await this.discoverProviders();
     this.configReady = true;
+    cx.notify();
+  }
+
+  // demo.json is a still of the stage — fake agents, accounts, flights and
+  // allowances — for screenshots and for trying the mod before a gateway
+  // exists. Times in it are relative (`ago`, `resetsIn`, seconds) so a shot
+  // taken months later still reads as now.
+  async loadDemo(cx) {
+    const now = Date.now();
+    let d = null;
+    try {
+      const raw = await readTextFile(`${appHome()}/mods/routing/demo.json`);
+      d = JSON.parse(raw || "{}");
+    } catch (e) {
+      this.offline = `demo.json: ${String(e).slice(0, 160)}`;
+      cx.notify();
+      return;
+    }
+    if (d.label) this.remoteLabel = String(d.label);
+    this.pid = d.pid ?? null;
+    this.totals = { requests: 0, rerouted: 0, errors: 0, ...(d.totals || {}) };
+    this.agents = (d.agents || []).map((a) => ({ id: String(a.id || a), color: hueOf(a.id || a) }));
+    this.accounts = (d.accounts || []).map((a) => ({
+      key: a.key, name: a.name || a.key, who: a.who || "", model: a.model || "",
+    }));
+    this.routes.clear();
+    for (const r of d.routes || []) {
+      const route = {
+        ...r,
+        time: new Date(now - (r.ago ?? 0) * 1000).toISOString(),
+        tries: (r.tries || []).map((tr) => ({ ...tr })),
+      };
+      this.routes.set(route.id, route);
+    }
+    this.flights.clear();
+    for (const f of d.flights || []) {
+      this.flights.set(f.id, {
+        id: f.id, agent: f.agent, color: hueOf(f.agent), seat: f.seat,
+        state: "held", phase: f.phase || "out", tryIndex: 0, bird: null, err: Boolean(f.err),
+      });
+    }
+    const quotas = {};
+    for (const [id, q] of Object.entries(d.quotas || {})) {
+      quotas[id] = {
+        left: q.left ?? null, name: q.name || id, plan: q.plan || "", kind: q.kind || "subscription",
+        balance: q.balance || "", error: q.error || "", hadText: Boolean(q.hadText),
+        windows: (q.windows || []).map((w) => ({
+          name: w.name || "", remaining: w.remaining, used: w.used, text: Boolean(w.text),
+          display: w.display || "", pool: w.pool || "",
+          resetsAt: w.resetsIn != null ? new Date(now + w.resetsIn * 1000).toISOString() : (w.resetsAt || ""),
+        })),
+      };
+    }
+    this.quotas = quotas;
+    this.quotasAt = now - (d.quotasAgo ?? 60) * 1000;
+    this.expandedRouteId = d.expandedRouteId ?? null;
+    this.quotaOpen = Boolean(d.quotaOpen);
+    this.masked = d.masked !== false;
+    this.loaded = true;
+    this.configReady = true;
+    this.offline = "";
     cx.notify();
   }
 
@@ -259,6 +329,7 @@ export default class Routing extends View {
   // one quotas read; without kept=1 the gateway asks the vendors again
   // (provider.QuotaReport), so this is a live refresh not a cache copy
   async fetchQuotas(cx) {
+    if (this.demo) return;
     this.quotaBusy = true; cx.notify();
     const t0 = Date.now();
     try {
@@ -311,6 +382,7 @@ export default class Routing extends View {
   }
 
   async refreshAll(cx) {
+    if (this.demo) return;
     this.traceBusy = true;
     cx.notify();
     try {

@@ -1,0 +1,314 @@
+{
+  "label": "localhost · 127.0.0.1:3425",
+  "pid": 48210,
+  "totals": {
+    "requests": 142,
+    "rerouted": 2,
+    "errors": 0
+  },
+  "masked": true,
+  "quotaOpen": false,
+  "expandedRouteId": 104,
+  "quotasAgo": 60,
+  "agents": [
+    {
+      "id": "claude"
+    },
+    {
+      "id": "codex"
+    },
+    {
+      "id": "pi"
+    },
+    {
+      "id": "cursor"
+    }
+  ],
+  "accounts": [
+    {
+      "key": "openai",
+      "name": "OpenAI",
+      "who": "org@acme.dev",
+      "model": "gpt-5.4"
+    },
+    {
+      "key": "deepseek",
+      "name": "DeepSeek",
+      "who": "api@acme.dev",
+      "model": "deepseek-r1"
+    },
+    {
+      "key": "anthropic",
+      "name": "Anthropic",
+      "who": "team@acme.dev",
+      "model": "claude-sonnet-4"
+    },
+    {
+      "key": "openrouter",
+      "name": "OpenRouter",
+      "who": "pro@acme.dev",
+      "model": "qwen-3-coder"
+    },
+    {
+      "key": "ai-studio",
+      "name": "Google AI Studio",
+      "who": "dev@acme.dev",
+      "model": "gemini-2.5-pro"
+    },
+    {
+      "key": "cursor",
+      "name": "Cursor",
+      "who": "pro@acme.dev",
+      "model": "claude-4-opus"
+    }
+  ],
+  "routes": [
+    {
+      "id": 106,
+      "agent": "claude",
+      "group": {
+        "ref": "group/coding"
+      },
+      "model": "anthropic/claude-sonnet-4",
+      "served": "claude-sonnet-4",
+      "provider": "Anthropic",
+      "ago": 3,
+      "done": false,
+      "tries": [
+        {
+          "id": "anthropic",
+          "name": "Anthropic",
+          "model": "claude-sonnet-4",
+          "done": false
+        }
+      ]
+    },
+    {
+      "id": 105,
+      "agent": "codex",
+      "group": {
+        "ref": "group/review"
+      },
+      "model": "openai/gpt-5.4",
+      "served": "gpt-5.4",
+      "provider": "OpenAI",
+      "ago": 2,
+      "done": false,
+      "tries": [
+        {
+          "id": "openai",
+          "name": "OpenAI",
+          "model": "gpt-5.4",
+          "done": false
+        }
+      ]
+    },
+    {
+      "id": 104,
+      "agent": "pi",
+      "group": {
+        "ref": "group/fast"
+      },
+      "model": "group/fast",
+      "served": "gemini-2.5-pro",
+      "provider": "Google AI Studio",
+      "ago": 14,
+      "done": true,
+      "status": 200,
+      "tokens": 24800,
+      "in": 21400,
+      "out": 3400,
+      "ttft": 340,
+      "ms": 3800,
+      "tries": [
+        {
+          "id": "deepseek",
+          "name": "DeepSeek",
+          "status": 429,
+          "ms": 420,
+          "done": true
+        },
+        {
+          "id": "ai-studio",
+          "name": "Google AI Studio",
+          "status": 200,
+          "ms": 3380,
+          "done": true
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "agent": "claude",
+      "group": {
+        "ref": "group/coding"
+      },
+      "model": "anthropic/claude-sonnet-4",
+      "served": "claude-sonnet-4",
+      "provider": "Anthropic",
+      "ago": 42,
+      "done": true,
+      "status": 200,
+      "tokens": 48200,
+      "in": 42000,
+      "out": 6200,
+      "ttft": 410,
+      "ms": 5400,
+      "tries": [
+        {
+          "id": "anthropic",
+          "name": "Anthropic",
+          "status": 200,
+          "ms": 5400,
+          "done": true
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "agent": "cursor",
+      "group": {
+        "ref": "group/coding"
+      },
+      "model": "deepseek/deepseek-r1",
+      "served": "deepseek-r1",
+      "provider": "DeepSeek",
+      "ago": 95,
+      "done": true,
+      "status": 200,
+      "tokens": 31500,
+      "in": 28000,
+      "out": 3500,
+      "ttft": 520,
+      "ms": 4100,
+      "tries": [
+        {
+          "id": "deepseek",
+          "name": "DeepSeek",
+          "status": 200,
+          "ms": 4100,
+          "done": true
+        }
+      ]
+    },
+    {
+      "id": 101,
+      "agent": "codex",
+      "group": {
+        "ref": "group/review"
+      },
+      "model": "openrouter/qwen-3-coder",
+      "served": "qwen-3-coder",
+      "provider": "OpenRouter",
+      "ago": 160,
+      "done": true,
+      "status": 200,
+      "tokens": 19400,
+      "in": 17000,
+      "out": 2400,
+      "ttft": 290,
+      "ms": 2200,
+      "tries": [
+        {
+          "id": "openrouter",
+          "name": "OpenRouter",
+          "status": 200,
+          "ms": 2200,
+          "done": true
+        }
+      ]
+    }
+  ],
+  "flights": [
+    {
+      "id": 106,
+      "agent": "claude",
+      "seat": "anthropic",
+      "phase": "out"
+    },
+    {
+      "id": 105,
+      "agent": "codex",
+      "seat": "openai",
+      "phase": "out"
+    },
+    {
+      "id": 104,
+      "agent": "pi",
+      "seat": "ai-studio",
+      "phase": "out"
+    },
+    {
+      "id": 102,
+      "agent": "cursor",
+      "seat": "deepseek",
+      "phase": "back"
+    }
+  ],
+  "quotas": {
+    "claude": {
+      "left": 82,
+      "name": "Claude",
+      "plan": "Max Plan",
+      "kind": "subscription",
+      "windows": [
+        {
+          "name": "5 hours",
+          "remaining": 76,
+          "used": 24,
+          "resetsIn": 10800
+        },
+        {
+          "name": "7 days",
+          "remaining": 88,
+          "used": 12,
+          "resetsIn": 432000
+        }
+      ]
+    },
+    "codex": {
+      "left": 64,
+      "name": "OpenAI Codex",
+      "plan": "Pro Plan",
+      "kind": "subscription",
+      "windows": [
+        {
+          "name": "5 hours",
+          "remaining": 64,
+          "used": 36,
+          "resetsIn": 14400
+        }
+      ]
+    },
+    "ai-studio": {
+      "left": null,
+      "name": "Google AI Studio",
+      "plan": "",
+      "kind": "subscription",
+      "hadText": true,
+      "windows": []
+    },
+    "cursor": {
+      "left": 0,
+      "name": "Cursor",
+      "plan": "Pro Plan",
+      "kind": "subscription",
+      "windows": [
+        {
+          "name": "Fast Requests",
+          "remaining": 0,
+          "used": 100,
+          "resetsIn": 43200
+        }
+      ]
+    },
+    "deepseek": {
+      "left": null,
+      "name": "DeepSeek",
+      "plan": "",
+      "kind": "balance",
+      "balance": "$48.20",
+      "windows": []
+    }
+  }
+}

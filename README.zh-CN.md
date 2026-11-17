@@ -28,6 +28,7 @@
 - **动态供应商配额监控** — 自动读取用户本机或远端 `~/.config/magpie/providers.json` 与路由元数据，内置 85+ 常见 Agent 与模型供应商彩色/单色图标。统一采用 **剩余百分比（Remaining %）** 与首字母大写（Title Case）规范，额度耗尽时醒目显示红色 `Exhausted`；自动隐藏无意义的静态说明文本，并在零冷却时常驻显示 `● Plenty Of Juice — Build On.`。
 - **可展开的请求追踪明细** — 区分 `IN FLIGHT` 与 `RECENT` 实时流，支持一键切换 `Masked` / `Shown` 隐私脱敏；点击任意请求行即可就地展开查看请求/实际模型切换、TTFT 首字延迟、输入/输出 Token 与历次 `tries` 状态码。
 - **原生设置页布局卡片** — 在 Herdr **Settings → Look → Layout** 中提供名为 **Magpie** 的专属布局与高清微缩预览图。
+- **可复现的离线演示模式** — 内置完全虚构的演示数据，无需网关、凭据或真实供应商信息即可渲染完整面板，适合制作截图、评审和在安装前体验。
 
 ## 快速安装
 
@@ -55,9 +56,22 @@ cp ~/.config/herdr-app/mods/routing/config.example.json \
 {
   "remote": "my-remote-machine",
   "label": "my-remote-machine · 127.0.0.1:3425",
-  "baseUrl": "http://127.0.0.1:3425"
+  "baseUrl": "http://127.0.0.1:3425",
+  "demo": false
 }
 ```
+
+## 离线演示模式（可选）
+
+将 `~/.config/herdr-app/mods/routing/config.json` 中的 `"demo"` 设为 `true`，即可使用内置的虚构数据渲染完整面板，而不会轮询任何网关：
+
+```json
+{
+  "demo": true
+}
+```
+
+演示数据位于 `~/.config/herdr-app/mods/routing/demo.json`，其中的 Agent、供应商、请求与配额均为虚构值。该模式不会发起网络请求，也不会读取你的真实 Magpie 供应商配置。恢复实时模式时将 `"demo"` 设回 `false` 即可。
 
 ## 开源协议
 

@@ -28,6 +28,7 @@ English · [简体中文](README.zh-CN.md)
 - **Dynamic Provider Quotas** — Automatically discovers your installed Magpie providers and brand icons (85+ bundled vector/raster logos). Displays unified **remaining-%** bars in Title Case (`Extra Credits`, `Free Plan`, `5 Hours`), flags depleted windows as `Exhausted`, hides noisy static config text rows, and shows `● Plenty Of Juice — Build On.` when a plugin provider has zero active cooldowns.
 - **Inline Request Inspector** — Clean `IN FLIGHT` and `RECENT` feeds with one-click `Masked` / `Shown` account privacy toggle. Click any request row to expand an inline trace card showing model swaps, TTFT latency, input/output tokens, and per-try HTTP statuses.
 - **First-Class Herdr Layout Card** — Ships as the **Magpie** layout (`layouts/Magpie.json`) with a custom vector/raster preview card (`layouts/Magpie.svg` & `layouts/Magpie.png`) in **Settings → Look**.
+- **Reproducible Demo Mode** — Built-in, fully synthetic fixture renders the complete stage without a gateway, credentials, or live provider data. Ideal for screenshots, reviews, and trying the mod before setup.
 
 ## What's Included
 
@@ -42,6 +43,7 @@ herdr-magpie/
 │   │   ├── main.js                 # Live topology stage, quota monitor, and request inspector
 │   │   ├── route.svg               # Routing node-split icon
 │   │   ├── config.example.json     # Optional local/remote Magpie gateway configuration
+│   │   ├── demo.json               # Synthetic fixture for offline previews and screenshots
 │   │   └── icons/                  # 85+ bundled agent & provider icons (SVG + 64x64 PNG)
 │   └── tabs-routing/
 │       └── main.js                 # Tab bar with per-space Routing / Files / Changes toggles
@@ -83,9 +85,22 @@ Edit `~/.config/herdr-app/mods/routing/config.json`:
 {
   "remote": "my-remote-machine",
   "label": "my-remote-machine · 127.0.0.1:3425",
-  "baseUrl": "http://127.0.0.1:3425"
+  "baseUrl": "http://127.0.0.1:3425",
+  "demo": false
 }
 ```
+
+### 4. Optional: Offline Demo Mode
+
+Set `"demo": true` in `~/.config/herdr-app/mods/routing/config.json` to render the built-in synthetic fixture instead of polling a gateway:
+
+```json
+{
+  "demo": true
+}
+```
+
+The fixture lives at `~/.config/herdr-app/mods/routing/demo.json` and contains only invented agents, providers, requests, and quota values. Demo mode makes no network requests and does not read your real Magpie providers. Set `"demo": false` to return to live mode.
 
 ## How the Flight State Machine Works
 

@@ -22,6 +22,7 @@ A Herdr workspace layout and side-panel mod that visualizes Magpie's live LLM ro
 - **Hover and click-to-filter**: Hovering any agent or account pill highlights its active and recent wires (`stroke: 2px`) while dimming unrelated wires (`0.16` opacity). Clicking a pill locks the selection and filters the `REQUESTS` list below.
 - **Expandable request trace**: Clicking any row in `IN FLIGHT` or `RECENT` expands an inset card showing requested-vs-served model swaps, TTFT, input/output token counts, and every try's account, HTTP status, and duration.
 - **Dynamic provider discovery**: Reads `~/.config/magpie/providers.json` and `/v1/magpie/trace` order metadata to resolve each user's installed providers and icons automatically.
+- **Offline demo mode**: Setting `"demo": true` in `mods/routing/config.json` loads the fully synthetic `mods/routing/demo.json` fixture, skips all gateway polling, and renders a deterministic review/screenshot stage with invented agents, providers, requests, and quotas.
 
 ## Built from
 
@@ -34,10 +35,11 @@ A Herdr workspace layout and side-panel mod that visualizes Magpie's live LLM ro
 
 - **Scroll preservation**: `quota-body` uses `overflow_y_scroll()` paired with `Scrollbar.vertical("quota-body")` inside a `relative().max_h(360)` wrapper instead of `overflow_y_scrollbar()`, because `overflow_y_scrollbar()` wraps the element and breaks `max_h`. Both `quota-body` and `requests-list` carry stable `.id()`s so 40ms flight frames never reset scroll position.
 - **Color vs. monochrome icons**: Monochrome icons use `svg().text_color()`, whereas multi-color brand icons are pre-rendered to `64×64` PNGs and drawn via `image()` so GPUI preserves their gradients.
-- **Network**: Polls `http://127.0.0.1:3425/v1/magpie/trace` and `/v1/magpie/quotas` locally by default, or on a remote Herdr core machine when configured in `mods/routing/config.json`.
+- **Network**: Polls `http://127.0.0.1:3425/v1/magpie/trace` and `/v1/magpie/quotas` locally by default, or on a remote Herdr core machine when configured in `mods/routing/config.json`. In demo mode, no network requests are made.
 
 ## Done when
 
 - `herdr-app check mods/routing` and `herdr-app check mods/tabs-routing` both pass.
 - Switching to `Magpie` (`herdr-app do layout.switch '{"name":"Magpie"}'`) shows the `Magpie` layout card and thumbnail in Settings → Look.
 - Clicking **Routing** in the tab bar opens the Magpie panel, renders smooth S-curves without dashed corner artifacts, scrolls `Agent Quota` without snapping back to the top, and expands request details inline without horizontal overflow.
+- Setting `"demo": true` in `mods/routing/config.json` renders the same interface from `mods/routing/demo.json` without contacting a gateway or exposing live provider data.
