@@ -55,10 +55,11 @@ const BUILTIN_ICONS = {
   chutes: "chutes", lambda: "lambda", baseten: "baseten", replicate: "replicate",
   huggingface: "huggingface-color", vercel: "vercel", aws: "aws", bedrock: "bedrock-color",
   azure: "azure-color", nvidia: "nvidia-color", poe: "poe", monica: "monica-color", coze: "coze",
+  "cline-pass": "cline", "stepfun-cn": "stepfun-color", "~keys": "magpie",
 };
 
 const ICON_PATTERNS = [
-  [/workbuddy/, "workbuddy-color"], [/codebuddy/, "codebuddy-color"],
+  [/workbuddy/, "workbuddy-color"], [/codebuddy/, "codebuddy-color"], [/cline/, "cline"],
   [/ai-?studio|google/, "google-color"], [/gemini/, "gemini-color"],
   [/agy|antigravity/, "antigravity-color"], [/claude|anthropic/, "claude-color"],
   [/codex/, "codex-color"], [/openai|gpt/, "openai"], [/deepseek/, "deepseek-color"],
@@ -151,6 +152,15 @@ export default class Routing extends View {
     this.quotasAt = 0;
     this.quotaOpen = false;
     this.quotaBusy = false;
+    this.expandedProviders = new Set();
+    this.expandedAccounts = new Set();
+    this.providerOrder = [];
+    this.accountOrder = {};
+    this.dragProvider = null;
+    this.overProvider = null;
+    this.dragAcct = null;
+    this.overAcct = null;
+    this.loadQuotaPrefs();
     this.traceBusy = false;
     this.lastSecTick = 0;
     this.demo = false; // config.json's "demo": renders mods/routing/demo.json, asks no gateway
@@ -204,8 +214,8 @@ export default class Routing extends View {
       await this.loadDemo(cx);
       return;
     }
-    await this.discoverProviders();
     this.configReady = true;
+    this.discoverProviders().then(() => cx.notify()).catch(() => {});
     cx.notify();
   }
 
@@ -247,19 +257,19 @@ export default class Routing extends View {
         state: "held", phase: f.phase || "out", tryIndex: 0, bird: null, err: Boolean(f.err),
       });
     }
-    const quotas = {};
-    for (const [id, q] of Object.entries(d.quotas || {})) {
-      quotas[id] = {
-        left: q.left ?? null, name: q.name || id, plan: q.plan || "", kind: q.kind || "subscription",
-        balance: q.balance || "", error: q.error || "", hadText: Boolean(q.hadText),
-        windows: (q.windows || []).map((w) => ({
-          name: w.name || "", remaining: w.remaining, used: w.used, text: Boolean(w.text),
-          display: w.display || "", pool: w.pool || "",
-          resetsAt: w.resetsIn != null ? new Date(now + w.resetsIn * 1000).toISOString() : (w.resetsAt || ""),
-        })),
-      };
+    const rawQuotas = [];
+    if (Array.isArray(d.quotas)) {
+      for (const q of d.quotas) rawQuotas.push(q);
+    } else {
+      for (const [id, q] of Object.entries(d.quotas || {})) {
+        if (Array.isArray(q?.accounts)) {
+          for (const a of q.accounts) rawQuotas.push({ provider: q.provider || id, name: q.name || id, ...a });
+        } else {
+          rawQuotas.push({ provider: q?.provider || id, name: q?.name || id, ...(q || {}) });
+        }
+      }
     }
-    this.quotas = quotas;
+    this.quotas = this.groupQuotaEntries(rawQuotas, now);
     this.quotasAt = now - (d.quotasAgo ?? 60) * 1000;
     this.expandedRouteId = d.expandedRouteId ?? null;
     this.quotaOpen = Boolean(d.quotaOpen);
@@ -314,16 +324,330 @@ export default class Routing extends View {
         }
         for (const id of [...this.routes.keys()].sort((a, b) => a - b).slice(0, -60)) this.routes.delete(id);
         this.loaded = true;
+        this.failCount = 0;
         this.offline = "";
         this.recompute();
         cx.notify();
       } catch (e) {
-        this.offline = `Remote trace error: ${String(e).slice(0, 240)}`;
-        this.loaded = false;
-        cx.notify();
+        this.failCount = (this.failCount || 0) + 1;
+        if (!this.routes.size || this.failCount >= 3) {
+          this.offline = `Remote trace error: ${String(e).slice(0, 240)}`;
+          this.loaded = false;
+          cx.notify();
+        }
         await cx.sleep(4000);
       }
     }
+  }
+
+  winLeft(w) {
+    if (w?.unlimited) return 100;
+    if (w?.remaining != null) return w.remaining;
+    if (w?.used != null) return Math.max(0, 100 - w.used);
+    return 100;
+  }
+
+  normalizeQuotaItem(p, now = Date.now()) {
+    const provider = String(p?.provider || p?.id || "unknown");
+    const baseProvider = provider.replace(/^remote-magpie\//, "");
+    const windows = (p?.windows || []).map((w) => ({
+      name: w.name || "",
+      remaining: w.remaining,
+      used: w.used,
+      resetsAt: w.resetsIn != null ? new Date(now + w.resetsIn * 1000).toISOString() : (w.resetsAt || ""),
+      pool: w.pool || "",
+      text: Boolean(w.text),
+      display: w.display || "",
+      amount: w.amount,
+      limit: w.limit,
+      unit: w.unit || "",
+      unlimited: Boolean(w.unlimited),
+    }));
+    const totalExact = windows.find((w) => w.name === "Total" && !w.text);
+    const totalCredits = windows.find((w) => /^total\s+credits$/i.test(w.name) && !w.text);
+    const total = totalExact || totalCredits;
+    const groups = new Map();
+    for (const w of windows) {
+      if (w.name === "Total" || w.text) continue;
+      const cleanName = w.pool ? w.name : w.name.replace(/\s*\((high|medium|low)\)|-tiered$/i, "");
+      let key;
+      if (w.pool) {
+        key = `pool:${w.pool}|${w.resetsAt || cleanName}`;
+      } else if (w.amount != null || w.limit != null || w.unit) {
+        key = `meter:${cleanName.toLowerCase()}`;
+      } else if (cleanName.includes("·")) {
+        const prefix = cleanName.split("·")[0].trim().toLowerCase();
+        key = `group:${prefix}|${w.resetsAt || cleanName}`;
+      } else {
+        const pctKey = Math.round(this.winLeft(w) * 10);
+        key = w.resetsAt ? `at:${w.resetsAt}|${pctKey}` : `no:${cleanName}`;
+      }
+      const cur = groups.get(key);
+      if (!cur) { groups.set(key, { ...w, name: cleanName }); continue; }
+      if (w.pool && !cur.pool) groups.set(key, { ...w, name: cleanName });
+    }
+    let shown = [...groups.values()];
+    if (baseProvider === "cursor" && shown.some((w) => /grok/i.test(w.name))) {
+      shown = shown.filter((w) => /grok/i.test(w.name));
+    }
+    const hadText = Boolean(p?.hadText) || windows.some((w) => w.text);
+    const nonTotal = shown.filter((w) => !/^total\s+credits$/i.test(w.name));
+    const avgSource = nonTotal.length ? nonTotal : shown;
+    const shownLeft = (p?.left !== undefined && p?.left !== null && !(p?.windows || []).length)
+      ? p.left
+      : (baseProvider !== "cursor" && total) ? this.winLeft(total)
+      : avgSource.length ? avgSource.reduce((a, w) => a + this.winLeft(w), 0) / avgSource.length
+      : null;
+    return {
+      provider,
+      baseProvider,
+      left: shownLeft,
+      name: p?.name || provider,
+      plan: p?.plan || "",
+      alias: p?.alias || "",
+      user: p?.user || "",
+      from: p?.from || "",
+      until: p?.until || "",
+      renew: p?.renew || "",
+      windows: shown,
+      hadText,
+      kind: p?.kind || ((p?.balance || (p?.error && !(p?.windows || []).length)) ? "balance" : "subscription"),
+      balance: p?.balance || "",
+      error: p?.error || "",
+      balanceError: "",
+    };
+  }
+
+  loadQuotaPrefs() {
+    try {
+      const raw = typeof localStorage !== "undefined" ? localStorage.getItem("routing.quotaPrefs") : null;
+      if (!raw) return;
+      const d = JSON.parse(raw);
+      if (typeof d?.quotaOpen === "boolean") this.quotaOpen = d.quotaOpen;
+      if (Array.isArray(d?.expandedProviders)) this.expandedProviders = new Set(d.expandedProviders.map(String));
+      if (Array.isArray(d?.expandedAccounts)) this.expandedAccounts = new Set(d.expandedAccounts.map(String));
+      if (Array.isArray(d?.providerOrder)) this.providerOrder = d.providerOrder.map(String);
+      if (d?.accountOrder && typeof d.accountOrder === "object" && !Array.isArray(d.accountOrder)) {
+        this.accountOrder = d.accountOrder;
+      }
+    } catch (_) { /* ignore storage errors */ }
+  }
+
+  saveQuotaPrefs() {
+    try {
+      if (typeof localStorage === "undefined") return;
+      localStorage.setItem("routing.quotaPrefs", JSON.stringify({
+        quotaOpen: Boolean(this.quotaOpen),
+        expandedProviders: [...this.expandedProviders],
+        expandedAccounts: [...this.expandedAccounts],
+        providerOrder: this.providerOrder,
+        accountOrder: this.accountOrder,
+      }));
+    } catch (_) { /* ignore storage errors */ }
+  }
+
+  orderedProviders() {
+    const entries = Object.entries(this.quotas || {});
+    if (!this.providerOrder?.length) return entries;
+    const rank = new Map(this.providerOrder.map((id, i) => [id, i]));
+    return [...entries].sort(([a], [b]) => {
+      const ra = rank.has(a) ? rank.get(a) : 1e9;
+      const rb = rank.has(b) ? rank.get(b) : 1e9;
+      return ra - rb;
+    });
+  }
+
+  orderedAccounts(provId, accounts) {
+    const list = accounts || [];
+    const order = this.accountOrder?.[provId];
+    if (!Array.isArray(order) || !order.length) return list;
+    const rank = new Map(order.map((k, i) => [k, i]));
+    return [...list].sort((a, b) => {
+      const ra = rank.has(a.key) ? rank.get(a.key) : 1e9;
+      const rb = rank.has(b.key) ? rank.get(b.key) : 1e9;
+      return ra - rb;
+    });
+  }
+
+  finishProviderDrag(clickedId, provIds) {
+    const from = this.dragProvider;
+    const over = this.overProvider;
+    this.dragProvider = null;
+    this.overProvider = null;
+    if (!from) return;
+    if (over && from !== over) {
+      const list = [...provIds];
+      const fromIdx = list.indexOf(from);
+      const toIdx = list.indexOf(over);
+      if (fromIdx >= 0 && toIdx >= 0 && fromIdx !== toIdx) {
+        list.splice(fromIdx, 1);
+        list.splice(toIdx, 0, from);
+        this.providerOrder = list;
+        this.saveQuotaPrefs();
+      }
+    } else if (clickedId === from) {
+      if (this.expandedProviders.has(from)) this.expandedProviders.delete(from);
+      else this.expandedProviders.add(from);
+      this.saveQuotaPrefs();
+    }
+  }
+
+  finishAcctDrag(provId, clickedKey, acctKeys) {
+    if (!this.dragAcct || this.dragAcct.prov !== provId) return;
+    const from = this.dragAcct.key;
+    const over = this.overAcct;
+    this.dragAcct = null;
+    this.overAcct = null;
+    if (!from) return;
+    if (over && from !== over) {
+      const list = [...acctKeys];
+      const fromIdx = list.indexOf(from);
+      const toIdx = list.indexOf(over);
+      if (fromIdx >= 0 && toIdx >= 0 && fromIdx !== toIdx) {
+        list.splice(fromIdx, 1);
+        list.splice(toIdx, 0, from);
+        this.accountOrder = { ...this.accountOrder, [provId]: list };
+        this.saveQuotaPrefs();
+      }
+    } else if (clickedKey === from) {
+      const foldKey = `${provId}::${from}`;
+      if (this.expandedAccounts.has(foldKey)) this.expandedAccounts.delete(foldKey);
+      else this.expandedAccounts.add(foldKey);
+      this.saveQuotaPrefs();
+    }
+  }
+
+  groupQuotaEntries(items, now = Date.now()) {
+    const grouped = {};
+    const mergeBalance = (target, balEntry) => {
+      if (balEntry.balance && !target.balance) target.balance = balEntry.balance;
+      else if (balEntry.error && !target.balance && !target.balanceError) target.balanceError = balEntry.error;
+    };
+    for (const raw of items || []) {
+      if (raw?.provider && raw?.icon && !String(raw.icon).startsWith("file:")) {
+        this.providerIcons.set(String(raw.provider).toLowerCase(), String(raw.icon));
+      }
+      const entry = this.normalizeQuotaItem(raw, now);
+      const prov = entry.provider;
+      if (!grouped[prov]) {
+        grouped[prov] = { provider: prov, baseProvider: entry.baseProvider, name: entry.name, accounts: [] };
+      } else if (grouped[prov].name === prov && entry.name && entry.name !== prov) {
+        grouped[prov].name = entry.name;
+      }
+      const accounts = grouped[prov].accounts;
+      const u = entry.user.trim().toLowerCase();
+      const al = entry.alias.trim().toLowerCase();
+      const isBal = entry.kind === "balance";
+      const matchIdx = accounts.findIndex((cur) => {
+        const curIsBal = cur.kind === "balance";
+        if (isBal === curIsBal) return false;
+        const target = isBal ? cur : entry;
+        if (target.balance || target.balanceError) return false;
+        const cu = cur.user.trim().toLowerCase();
+        const cal = cur.alias.trim().toLowerCase();
+        if ((u || al) && (cu || cal)) return u === cu && al === cal;
+        return true;
+      });
+      if (matchIdx >= 0) {
+        const cur = accounts[matchIdx];
+        if (isBal) mergeBalance(cur, entry);
+        else {
+          mergeBalance(entry, cur);
+          accounts[matchIdx] = entry;
+        }
+      } else {
+        accounts.push(entry);
+      }
+    }
+
+    for (const group of Object.values(grouped)) {
+      const accts = group.accounts;
+      const seenKeys = new Map();
+      accts.forEach((a, i) => {
+        a.num = i + 1;
+        const u = a.user.trim().toLowerCase();
+        const al = a.alias.trim().toLowerCase();
+        const baseKey = u ? `u:${u}` : al ? `a:${al}` : `n:${a.num}`;
+        const cnt = (seenKeys.get(baseKey) || 0) + 1;
+        seenKeys.set(baseKey, cnt);
+        a.key = cnt > 1 ? `${baseKey}#${cnt}` : baseKey;
+      });
+
+      if (accts.length > 1) {
+        // Unify credit breakdown (Credits / Extra credits / Total credits) across accounts of the same provider
+        const hasCreditBreakdown = accts.some((a) =>
+          a.windows.some((w) => /^extra\s+credits$/i.test(w.name)) &&
+          a.windows.some((w) => /^total\s+credits$/i.test(w.name)));
+        if (hasCreditBreakdown) {
+          for (const a of accts) {
+            const cred = a.windows.find((w) => /^credits$/i.test(w.name));
+            if (!cred) continue;
+            if (!a.windows.some((w) => /^extra\s+credits$/i.test(w.name))) {
+              a.windows.push({
+                name: "Extra credits",
+                used: 100,
+                remaining: 0,
+                resetsAt: "",
+                pool: "",
+                text: false,
+                display: "0 / 0",
+                unit: cred.unit || "credits",
+                unlimited: false,
+              });
+            }
+            if (!a.windows.some((w) => /^total\s+credits$/i.test(w.name))) {
+              a.windows.push({
+                name: "Total credits",
+                used: cred.used,
+                remaining: cred.remaining,
+                resetsAt: cred.resetsAt || "",
+                pool: "",
+                text: false,
+                display: cred.display || "",
+                unit: cred.unit || "credits",
+                unlimited: false,
+              });
+            }
+          }
+        }
+
+        // Unify 5-hour / 7-day paired pool windows when an exhausted 7-day pool omits its 5-hour window
+        const fiveHourByPrefix = new Map();
+        for (const a of accts) {
+          for (const w of a.windows) {
+            if (w.name.includes("·") && /5\s*h/i.test(w.name)) {
+              const prefix = w.name.split("·")[0].trim().toLowerCase();
+              if (!fiveHourByPrefix.has(prefix)) fiveHourByPrefix.set(prefix, w);
+            }
+          }
+        }
+        if (fiveHourByPrefix.size) {
+          for (const a of accts) {
+            for (const [prefix, tpl] of fiveHourByPrefix) {
+              const has5h = a.windows.some((w) =>
+                w.name.includes("·") && w.name.split("·")[0].trim().toLowerCase() === prefix && /5\s*h/i.test(w.name));
+              if (has5h) continue;
+              const w7d = a.windows.find((w) =>
+                w.name.includes("·") && w.name.split("·")[0].trim().toLowerCase() === prefix && /7\s*d/i.test(w.name));
+              if (w7d && this.winLeft(w7d) <= 0) {
+                a.windows.push({
+                  name: tpl.name,
+                  used: 100,
+                  remaining: 0,
+                  resetsAt: w7d.resetsAt || "",
+                  pool: w7d.pool || tpl.pool || "",
+                  text: false,
+                  display: "",
+                  unit: "",
+                  unlimited: false,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+    return grouped;
   }
 
   // one quotas read; without kept=1 the gateway asks the vendors again
@@ -336,42 +660,7 @@ export default class Routing extends View {
       const r = await exec("curl", ["-sS", "--max-time", "20", `${this.baseUrl}/v1/magpie/quotas`],
         this.execOpts(25000));
       const d = JSON.parse(r.stdout);
-      const next = {};
-      for (const p of d.data || []) {
-        const windows = (p.windows || []).map(w => ({
-          name: w.name || "", remaining: w.remaining, used: w.used, resetsAt: w.resetsAt || "",
-          pool: w.pool || "", text: Boolean(w.text), display: w.display || "",
-        }));
-        const total = windows.find(w => w.name === "Total" && !w.text);
-        const groups = new Map();
-        for (const w of windows) {
-          if (w.name === "Total" || w.text) continue;
-          const key = w.resetsAt || `no:${w.name}`;
-          const cur = groups.get(key);
-          if (!cur) { groups.set(key, { ...w }); continue; }
-          if (w.pool && !cur.pool) groups.set(key, { ...w });
-        }
-        let shown = [...groups.values()].map(w => {
-          if (!w.pool) w.name = w.name.replace(/\s*\((high|medium|low)\)|-tiered$/i, "");
-          return w;
-        });
-        if (p.provider === "cursor" && shown.some(w => /grok/i.test(w.name))) {
-          shown = shown.filter(w => /grok/i.test(w.name));
-        }
-        const hadText = windows.some(w => w.text);
-        const shownLeft = (p.provider !== "cursor" && total) ? total.remaining
-          : shown.length ? shown.reduce((a, w) => a + (w.remaining ?? 100), 0) / shown.length
-          : null;
-        const entry = {
-          left: shownLeft, name: p.name || p.provider, plan: p.plan || "", windows: shown,
-          hadText, kind: p.kind || "", balance: p.balance || "", error: p.error || "",
-        };
-        const prev = next[p.provider];
-        const rank = (e) => ((e.windows.length || e.hadText) ? 4 : 0)
-          + (/ultra/i.test(e.plan) ? 2 : /pro/i.test(e.plan) ? 1 : 0);
-        if (!prev || rank(entry) > rank(prev)) next[p.provider] = entry;
-      }
-      this.quotas = next;
+      this.quotas = this.groupQuotaEntries(d.data || [], Date.now());
       this.quotasAt = Date.now();
       cx.notify();
     } finally {
@@ -801,24 +1090,66 @@ export default class Routing extends View {
     return `${Math.max(1, Math.round(out / (gen / 1000)))} tok/s`;
   }
 
+  // The share of the prompt read from the vendors' cache, as magpie's own
+  // routing page reads it (routing/client.js promptOf): input excludes both
+  // cache tiers, writes count in the denominator, and a vendor that counts no
+  // cache tokens (Kiro, cache_unknown) has no rate at all rather than 0%.
+  // The trace's usage[] is per try, so a retried request's billable attempts
+  // are all counted. null when nothing is known.
+  cacheHit(r) {
+    let prompt = 0, read = 0;
+    for (const u of r?.usage || []) {
+      if (u.cache_unknown) continue;
+      read += u.cache_read || 0;
+      prompt += (u.in || 0) + (u.cache_read || 0) + (u.cache_write || 0);
+    }
+    if (!prompt) return null;
+    return Math.round((read / prompt) * 100);
+  }
+
   quotaPanel(t) {
     const W = this.size.width || 336;
     try {
-      const providers = Object.entries(this.quotas);
+      const providers = this.orderedProviders();
+      const provIds = providers.map(([id]) => id);
+      const acctKeysByProv = new Map();
       const rows = [];
-      const nameW = Math.max(64, Math.min(96, W - 220));
+      const nameW = Math.max(68, Math.min(118, W - 196));
       const barW = Math.max(40, Math.min(84, W - 220));
       const titleCase = (s) => String(s || "").replace(/\b([a-z])([a-z]*)\b/g, (_, a, b) => a.toUpperCase() + b);
-      for (const [id, q] of providers) {
-        const poolOf = (w) => {
-          if (w.pool) return w.pool;
-          const n = w.name.toLowerCase();
-          if (/claude|gpt/.test(n)) return "claude & gpt";
-          const m = n.match(/^([a-z0-9 .&-]+?)(?:\s*·|$)/);
-          return m ? m[1].trim() : n;
-        };
-        const wins = (q.windows || []).filter(w => !w.text)
+      const poolOf = (w) => {
+        if (w.pool) return w.pool;
+        const n = w.name.toLowerCase();
+        if (/claude|gpt/.test(n)) return "claude & gpt";
+        const m = n.match(/^([a-z0-9 .&-]+?)(?:\s*·|$)/);
+        return m ? m[1].trim() : n;
+      };
+      const creditRank = (name) => /^credits$/i.test(name) ? 0
+        : /^extra\s+credits$/i.test(name) ? 1
+        : /^total\s+credits$/i.test(name) ? 2 : -1;
+      const summarizeGroup = (group) => {
+        const accts = group.accounts || [];
+        const lefts = accts.map((a) => a.left).filter((v) => v != null);
+        const bestLeft = lefts.length ? Math.max(...lefts) : null;
+        const bestBalance = bestLeft == null ? (accts.find((a) => a.balance)?.balance || "") : "";
+        const allErr = bestLeft == null && !bestBalance && accts.length > 0 && accts.every((a) => Boolean(a.error));
+        return { bestLeft, bestBalance, allErr, count: accts.length };
+      };
+      const acctStatusBadge = (q) => {
+        if (q.left != null) {
+          const pct = Math.round(q.left);
+          const color = q.left < 10 ? "#e26a6a" : q.left < 30 ? "#d4b06a" : "#34d399";
+          return { text: pct <= 0 ? "Exhausted" : `${pct}%`, color };
+        }
+        if (q.balance) return { text: String(q.balance), color: "#34d399" };
+        if (q.error) return { text: "Error", color: "#e26a6a" };
+        return { text: "Ready", color: "#34d399" };
+      };
+      const buildAccountBars = (q, wName) => {
+        const wins = (q.windows || []).filter((w) => !w.text)
           .sort((a, b) => {
+            const ca = creditRank(a.name), cb = creditRank(b.name);
+            if (ca >= 0 && cb >= 0) return ca - cb;
             const pa = poolOf(a), pb = poolOf(b);
             if (pa !== pb) {
               const rank = /gemini/i.test(pa) ? 0 : /claude|gpt/.test(pa) ? 1 : 2;
@@ -828,22 +1159,26 @@ export default class Routing extends View {
             }
             return Date.parse(a.resetsAt || "9999") - Date.parse(b.resetsAt || "9999");
           })
-          .slice(0, 6);
-        const nextReset = wins.map(w => w.resetsAt).filter(Boolean).sort()[0];
-        const barRows = wins.map(w => {
+          .slice(0, 10);
+        const nextReset = wins.map((w) => w.resetsAt).filter(Boolean).sort()[0];
+        const barRows = wins.map((w) => {
           const label = titleCase(w.name);
-          const left = w.remaining ?? (100 - (w.used ?? 0));
-          const frac = Math.max(0, Math.min(1, left / 100));
-          const exhausted = Math.round(left) <= 0;
-          const color = left < 10 ? "#e26a6a" : left < 30 ? "#d4b06a" : "#34d399";
+          const left = this.winLeft(w);
+          const frac = w.unlimited ? 1 : Math.max(0, Math.min(1, left / 100));
+          const exhausted = !w.unlimited && Math.round(left) <= 0;
+          const color = w.unlimited ? "#34d399" : left < 10 ? "#e26a6a" : left < 30 ? "#d4b06a" : "#34d399";
+          const valText = w.unlimited ? "Unlimited" : exhausted ? "Exhausted" : `${Math.round(left)}%`;
           return h_flex().items_center().gap(5)
-            .child(div().w(nameW).text_size(8.5).text_color(t.muted).flex_none().truncate().child(label))
+            .child(div().w(wName).text_size(8.5).text_color(t.muted).flex_none().truncate().child(label))
             .child(div().w(barW).h(3).rounded(2).bg(t.border).flex_none()
-              .when(frac > 0, el => el.child(div().h_full().rounded(2).w(Math.max(2, Math.round(barW * frac))).bg(color))))
-            .child(div().text_size(8.5).text_color(color).flex_none()
-              .child(exhausted ? "Exhausted" : `${Math.round(left)}%`));
+              .when(frac > 0, (el) => el.child(div().h_full().rounded(2).w(Math.max(2, Math.round(barW * frac))).bg(color))))
+            .child(div().text_size(8.5).text_color(color).flex_none().child(valText));
         });
-        if (!wins.length && q.balance) {
+        if (wins.length && q.balance) {
+          barRows.push(div().text_size(8.5).text_color(t.muted).child(`Balance: ${q.balance}`));
+        } else if (wins.length && q.balanceError) {
+          barRows.push(div().text_size(8.5).text_color(t.dim).child(`Balance: ${q.balanceError}`));
+        } else if (!wins.length && q.balance) {
           barRows.push(div().text_size(9.5).text_color("#34d399").child(`${q.balance} left`));
         } else if (!wins.length && q.error) {
           barRows.push(div().text_size(8.5).text_color(t.dim).child(`Balance: ${q.error}`));
@@ -852,19 +1187,224 @@ export default class Routing extends View {
             .child(div().size(5).rounded(2.5).bg("#34d399").flex_none())
             .child(div().text_size(9).text_color("#34d399").child("Plenty Of Juice — Build On.")));
         }
-        rows.push(v_flex().gap(3)
-          .child(h_flex().items_center().gap(6)
+        return { barRows, nextReset };
+      };
+
+      const fromProvIdx = this.dragProvider ? provIds.indexOf(this.dragProvider) : -1;
+
+      for (let provIdx = 0; provIdx < providers.length; provIdx++) {
+        const [id, group] = providers[provIdx];
+        const rawAccounts = group.accounts || [];
+        if (!rawAccounts.length) continue;
+        const accounts = this.orderedAccounts(id, rawAccounts);
+        const acctKeys = accounts.map((a) => a.key);
+        acctKeysByProv.set(id, acctKeys);
+        const provFolded = !this.expandedProviders.has(id);
+        const provDragging = this.dragProvider === id && this.overProvider !== id;
+        const provDropTarget = this.dragProvider !== null && this.overProvider === id && this.dragProvider !== id;
+
+        if (accounts.length === 1) {
+          const q = accounts[0];
+          const { barRows, nextReset } = buildAccountBars(q, nameW);
+          const badgeParts = [];
+          if (q.alias) badgeParts.push(q.alias);
+          if (q.plan && q.plan.toLowerCase() !== String(q.alias || "").toLowerCase()) {
+            badgeParts.push(titleCase(q.plan));
+          }
+          const badge = badgeParts.join(" · ");
+          const who = !this.masked && q.user ? q.user : "";
+          const foldedStatus = provFolded ? acctStatusBadge(q) : null;
+          rows.push(v_flex().relative().id(`quota-prov-${id}`).gap(2)
+            .when(provDragging, (el) => el.opacity(0.45))
+            .on_mouse_move((_e, cx2) => {
+              if (this.dragProvider !== null && this.overProvider !== id) {
+                this.overProvider = id;
+                cx2.notify();
+              }
+            })
+            .on_mouse_up("left", (_e, cx2) => {
+              if (this.dragProvider !== null) {
+                cx2.stop_propagation();
+                this.finishProviderDrag(id, provIds);
+                cx2.notify();
+              }
+            })
+            .child(h_flex().id(`quota-prov-hdr-${id}`).px(4).py(2).rounded(5).items_center().gap(5)
+              .cursor_pointer().hover((s) => s.bg(t.hover))
+              .on_mouse_down("left", (_e, cx2) => {
+                cx2.stop_propagation();
+                this.dragProvider = id;
+                this.overProvider = id;
+                this.dragAcct = null;
+                this.overAcct = null;
+              })
+              .child(div().w(8).text_size(9).text_color(t.dim).flex_none().child(provFolded ? "▸" : "▾"))
+              .child(iconEl(id, 14, t.muted, this.providerIcons))
+              .child(div().text_size(10.5).font_semibold().truncate().flex_1().min_w(0).child(String(group.name || id)))
+              .when(Boolean(badge), (el) => el.child(div().text_size(8.5).text_color(t.dim).flex_none().child(`· ${badge}`)))
+              .when(Boolean(who), (el) => el.child(div().text_size(8.5).text_color(t.muted).flex_none().max_w(90).truncate().child(`· ${who}`)))
+              .when(Boolean(foldedStatus), (el) => el.child(div().text_size(8.5).font_semibold().text_color(foldedStatus.color).flex_none().child(foldedStatus.text)))
+              .child(div().text_size(9).text_color(t.dim).flex_none()
+                .child(nextReset ? `Resets ${this.fmtUntil(nextReset)}` : "")))
+            .when(!provFolded, (el) => el.child(v_flex().pl(24).pr(4).gap(2).children(barRows)))
+            .when(provDropTarget, (el) => el.child(
+              div().absolute().left(2).right(2).h(2).rounded(1).bg(t.accent)
+                .when(fromProvIdx < provIdx, (line) => line.bottom(0))
+                .when(fromProvIdx > provIdx, (line) => line.top(0))
+            )));
+          continue;
+        }
+
+        const plans = accounts.map((a) => (a.plan ? titleCase(a.plan) : "")).filter(Boolean);
+        const sharedPlan = plans.length === accounts.length && new Set(plans).size === 1 ? plans[0] : "";
+        const subNameW = Math.max(64, nameW - 6);
+        const baseLabels = accounts.map((q, idx) => q.alias
+          ? (!this.masked && q.user ? `${q.alias} · ${q.user}` : q.alias)
+          : (!this.masked && q.user ? q.user : `Account ${q.num || idx + 1}`));
+        const labelCounts = new Map();
+        for (const lbl of baseLabels) labelCounts.set(lbl, (labelCounts.get(lbl) || 0) + 1);
+        const labelSeen = new Map();
+        const fromAcctIdx = this.dragAcct?.prov === id ? acctKeys.indexOf(this.dragAcct.key) : -1;
+
+        const subBlocks = accounts.map((q, idx) => {
+          const { barRows, nextReset } = buildAccountBars(q, subNameW);
+          const baseLbl = baseLabels[idx];
+          const seenIdx = (labelSeen.get(baseLbl) || 0) + 1;
+          labelSeen.set(baseLbl, seenIdx);
+          const acctLabel = (labelCounts.get(baseLbl) || 0) > 1 ? `${baseLbl} #${seenIdx}` : baseLbl;
+          const acctPlanRaw = q.plan ? titleCase(q.plan) : "";
+          const acctPlan = acctPlanRaw && acctPlanRaw !== sharedPlan && acctPlanRaw.toLowerCase() !== String(q.alias || "").toLowerCase()
+            ? acctPlanRaw : "";
+          const dotColor = q.left != null
+            ? (q.left < 10 ? "#e26a6a" : q.left < 30 ? "#d4b06a" : "#34d399")
+            : (q.error && !q.balance ? "#e26a6a" : "#34d399");
+          const acctFolded = !this.expandedAccounts.has(`${id}::${q.key}`);
+          const acctStatus = acctFolded ? acctStatusBadge(q) : null;
+          const acctDragging = this.dragAcct?.prov === id && this.dragAcct.key === q.key && this.overAcct !== q.key;
+          const acctDropTarget = this.dragAcct?.prov === id && this.overAcct === q.key && this.dragAcct.key !== q.key;
+
+          return v_flex().relative().id(`quota-acct-${id}-${q.key}`).gap(2)
+            .when(acctDragging, (el) => el.opacity(0.45))
+            .on_mouse_move((_e, cx2) => {
+              if (this.dragAcct?.prov === id && this.overAcct !== q.key) {
+                this.overAcct = q.key;
+                cx2.notify();
+              }
+            })
+            .on_mouse_up("left", (_e, cx2) => {
+              if (this.dragAcct?.prov === id) {
+                cx2.stop_propagation();
+                this.finishAcctDrag(id, q.key, acctKeys);
+                cx2.notify();
+              }
+            })
+            .child(h_flex().id(`quota-acct-hdr-${id}-${q.key}`).px(4).py(1.5).rounded(5).items_center().gap(5)
+              .cursor_pointer().hover((s) => s.bg(t.hover))
+              .on_mouse_down("left", (_e, cx2) => {
+                cx2.stop_propagation();
+                this.dragAcct = { prov: id, key: q.key };
+                this.overAcct = q.key;
+                this.dragProvider = null;
+                this.overProvider = null;
+              })
+              .child(div().w(7).text_size(8.5).text_color(t.dim).flex_none().child(acctFolded ? "▸" : "▾"))
+              .child(div().size(5).rounded(2.5).bg(dotColor).flex_none())
+              .child(div().text_size(9.5).font_semibold().text_color(t.foreground).truncate().flex_1().min_w(0).child(acctLabel))
+              .when(Boolean(acctPlan), (el) => el.child(div().text_size(8.5).text_color(t.dim).flex_none().child(`· ${acctPlan}`)))
+              .when(Boolean(acctStatus), (el) => el.child(div().text_size(8.5).font_semibold().text_color(acctStatus.color).flex_none().child(acctStatus.text)))
+              .child(div().text_size(8.5).text_color(t.dim).flex_none()
+                .child(nextReset ? `Resets ${this.fmtUntil(nextReset)}` : "")))
+            .when(!acctFolded, (el) => el.child(v_flex().pl(16).pr(4).gap(2).children(barRows)))
+            .when(acctDropTarget, (el) => el.child(
+              div().absolute().left(4).right(2).h(2).rounded(1).bg(t.accent)
+                .when(fromAcctIdx < idx, (line) => line.bottom(0))
+                .when(fromAcctIdx > idx, (line) => line.top(0))
+            ));
+        });
+
+        const grpSummary = provFolded ? summarizeGroup(group) : null;
+        const grpPct = grpSummary && grpSummary.bestLeft != null ? Math.round(grpSummary.bestLeft) : null;
+        const grpVal = !grpSummary ? ""
+          : grpPct != null ? (grpPct <= 0 ? "Exhausted" : `${grpPct}%`)
+          : grpSummary.bestBalance ? String(grpSummary.bestBalance)
+          : grpSummary.allErr ? "Error" : "Ready";
+        const grpCol = !grpSummary ? t.dim
+          : grpSummary.allErr ? "#e26a6a"
+          : grpPct == null ? "#34d399"
+          : grpPct < 10 ? "#e26a6a" : grpPct < 30 ? "#d4b06a" : "#34d399";
+
+        rows.push(v_flex().relative().id(`quota-prov-${id}`).gap(3)
+          .when(provDragging, (el) => el.opacity(0.45))
+          .on_mouse_move((_e, cx2) => {
+            if (this.dragProvider !== null && this.overProvider !== id) {
+              this.overProvider = id;
+              cx2.notify();
+            }
+          })
+          .on_mouse_up("left", (_e, cx2) => {
+            if (this.dragAcct?.prov === id) {
+              cx2.stop_propagation();
+              this.finishAcctDrag(id, null, acctKeys);
+              cx2.notify();
+              return;
+            }
+            if (this.dragProvider !== null) {
+              cx2.stop_propagation();
+              this.finishProviderDrag(id, provIds);
+              cx2.notify();
+            }
+          })
+          .child(h_flex().id(`quota-prov-hdr-${id}`).px(4).py(2).rounded(5).items_center().gap(5)
+            .cursor_pointer().hover((s) => s.bg(t.hover))
+            .on_mouse_move((_e, cx2) => {
+              if (this.dragAcct?.prov === id && acctKeys.length && this.overAcct !== acctKeys[0]) {
+                this.overAcct = acctKeys[0];
+                cx2.notify();
+              }
+            })
+            .on_mouse_down("left", (_e, cx2) => {
+              cx2.stop_propagation();
+              this.dragProvider = id;
+              this.overProvider = id;
+              this.dragAcct = null;
+              this.overAcct = null;
+            })
+            .child(div().w(8).text_size(9).text_color(t.dim).flex_none().child(provFolded ? "▸" : "▾"))
             .child(iconEl(id, 14, t.muted, this.providerIcons))
-            .child(div().text_size(10.5).font_semibold().truncate().flex_1().min_w(0).child(String(q.name || id)))
-            .child(q.plan ? div().text_size(8.5).text_color(t.dim).flex_none().child(`· ${titleCase(q.plan)}`) : div().w(0))
-            .child(div().text_size(9).text_color(t.dim).flex_none()
-              .child(nextReset ? `Resets ${this.fmtUntil(nextReset)}` : "")))
-          .child(v_flex().pl(22).gap(2).children(barRows)));
+            .child(div().text_size(10.5).font_semibold().truncate().flex_1().min_w(0).child(String(group.name || id)))
+            .when(Boolean(sharedPlan), (el) => el.child(div().text_size(8.5).text_color(t.dim).flex_none().child(`· ${sharedPlan}`)))
+            .when(Boolean(grpVal), (el) => el.child(div().text_size(8.5).font_semibold().text_color(grpCol).flex_none().child(grpVal)))
+            .child(div().text_size(8.5).text_color(t.dim).flex_none().child(`${accounts.length} Accounts`)))
+          .when(!provFolded, (el) => el.child(v_flex().pl(14).gap(5).children(subBlocks)))
+          .when(provDropTarget, (el) => el.child(
+            div().absolute().left(2).right(2).h(2).rounded(1).bg(t.accent)
+              .when(fromProvIdx < provIdx, (line) => line.bottom(0))
+              .when(fromProvIdx > provIdx, (line) => line.top(0))
+          )));
       }
       if (!rows.length) rows.push(div().text_size(10).text_color(t.dim).child("No quota reported yet."));
+      const commitAnyDrag = (cx2) => {
+        let changed = false;
+        if (this.dragAcct) {
+          const pId = this.dragAcct.prov;
+          this.finishAcctDrag(pId, null, acctKeysByProv.get(pId) || []);
+          changed = true;
+        }
+        if (this.dragProvider) {
+          this.finishProviderDrag(null, provIds);
+          changed = true;
+        }
+        if (changed) {
+          this.lastDragEndAt = Date.now();
+          cx2.notify();
+        }
+        return changed;
+      };
       const body = div().relative().max_h(360).min_h(0).flex_shrink(1)
         .child(v_flex().id("quota-body").max_h(360).min_h(0).flex_shrink(1)
-          .overflow_y_scroll().px(10).pb(10).gap(10).children(rows))
+          .overflow_y_scroll().px(6).pt(4).pb(10).gap(6)
+          .on_mouse_up("left", (_e, cx2) => { commitAnyDrag(cx2); })
+          .children(rows))
         .child(Scrollbar.vertical("quota-body").absolute().inset_0());
       const shortName = (id, name) => {
         const clean = String(name || id)
@@ -873,26 +1413,44 @@ export default class Routing extends View {
           .replace(/^Google\s+/i, "");
         return clean || String(id);
       };
-      const chipProviders = providers
-        .filter(([, q]) => q.left != null || q.balance)
-        .concat(providers.filter(([, q]) => q.left == null && !q.balance))
+      const withMetrics = providers.map(([id, g]) => [id, g, summarizeGroup(g)]);
+      const chipProviders = withMetrics
+        .filter(([, , s]) => s.bestLeft != null || s.bestBalance)
+        .concat(withMetrics.filter(([, , s]) => s.bestLeft == null && !s.bestBalance && !s.allErr))
+        .concat(withMetrics.filter(([, , s]) => s.allErr))
         .slice(0, 4);
-      const summaryChips = chipProviders.map(([id, q]) => {
-        const pct = q.left != null ? Math.round(q.left) : null;
-        const val = pct != null ? `${pct}%` : (q.balance ? String(q.balance) : "Ready");
-        const valColor = pct == null ? "#34d399" : pct < 10 ? "#e26a6a" : pct < 30 ? "#d4b06a" : "#34d399";
+      const summaryChips = chipProviders.map(([id, group, s]) => {
+        const pct = s.bestLeft != null ? Math.round(s.bestLeft) : null;
+        const val = pct != null ? `${pct}%` : (s.bestBalance ? String(s.bestBalance) : (s.allErr ? "Error" : "Ready"));
+        const valColor = s.allErr ? "#e26a6a" : pct == null ? "#34d399" : pct < 10 ? "#e26a6a" : pct < 30 ? "#d4b06a" : "#34d399";
         return h_flex().items_center().gap(4).flex_none()
           .child(iconEl(id, 11, t.muted, this.providerIcons))
-          .child(div().text_size(9).text_color(t.muted).max_w(76).truncate().child(shortName(id, q.name)))
+          .child(div().text_size(9).text_color(t.muted).max_w(s.count > 1 ? 62 : 76).truncate().child(shortName(id, group.name)))
+          .when(s.count > 1, (el) => el.child(div().text_size(8).text_color(t.dim).child(`×${s.count}`)))
           .child(div().text_size(9).font_semibold().text_color(valColor).child(val));
       });
       const summaryRow = h_flex().px(10).pb(8).gap(8).items_center().overflow_hidden().cursor_pointer()
-        .on_click((_, cx2) => { this.quotaOpen = true; cx2.notify(); })
+        .on_click((_, cx2) => { this.quotaOpen = true; this.saveQuotaPrefs(); cx2.notify(); })
         .when(summaryChips.length > 0, el => el.children(summaryChips))
         .when(!summaryChips.length, el => el.child(div().text_size(9).text_color(t.dim).child("Loading provider quotas…")));
       return v_flex().mx(10).mb(8).rounded(10).bg(t.canvas).border(1).border_color(t.border)
+        .on_mouse_up("left", (_e, cx2) => { commitAnyDrag(cx2); })
         .child(h_flex().px(10).pt(8).pb(6).items_center().cursor_pointer()
-          .on_click((_, cx2) => { this.quotaOpen = !this.quotaOpen; cx2.notify(); })
+          .on_mouse_move((_e, cx2) => {
+            if (this.dragProvider !== null && provIds.length && this.overProvider !== provIds[0]) {
+              this.overProvider = provIds[0];
+              cx2.notify();
+            }
+          })
+          .on_mouse_up("left", (_e, cx2) => {
+            if (commitAnyDrag(cx2)) cx2.stop_propagation();
+          })
+          .on_click((_, cx2) => {
+            if (this.dragProvider || this.dragAcct || (Date.now() - (this.lastDragEndAt || 0) < 300)) return;
+            this.quotaOpen = !this.quotaOpen;
+            this.saveQuotaPrefs();
+            cx2.notify();
+          })
           .child(div().text_size(10).text_color(t.muted).pr(5).child(this.quotaOpen ? "▾" : "▸"))
           .child(div().text_size(11).font_semibold().child("Agent Quota"))
           .child(div().text_size(9.5).text_color(t.dim).pl(6)
@@ -1121,8 +1679,9 @@ export default class Routing extends View {
       const tries = r.tries?.length || 0;
       const retry = tries > 1 ? `${tries} try · ` : "";
       const tps = r.done ? this.toksPerS(r) : "";
+      const cache = r.done ? this.cacheHit(r) : null;
       const stat = r.done
-        ? `${retry}${this.fmtTok(r.tokens)} tokens · ${this.fmtMs(r.ms)}${tps && tps !== "—" ? ` · ${tps}` : ""}`
+        ? `${retry}${this.fmtTok(r.tokens)} tokens · ${this.fmtMs(r.ms)}${tps && tps !== "—" ? ` · ${tps}` : ""}${cache != null ? ` · ${cache}% cached` : ""}`
         : `${retry}${this.fmtElapsed(now - new Date(r.time).getTime())}…`;
       // the state dot and the seat's name share the request's colour:
       // gold in flight, green answered, red failed — magpie's row read
@@ -1138,6 +1697,7 @@ export default class Routing extends View {
         r.ttft != null ? `TTFT ${this.fmtMs(r.ttft)}` : null,
         r.in ? `in ${this.fmtTok(r.in)}` : null,
         r.out ? `out ${this.fmtTok(r.out)}` : null,
+        cache != null ? `cache hit ${cache}%` : null,
       ].filter(Boolean).join(" · ");
       const detailBlock = expanded ? v_flex().mt(4).ml(20).px(8).py(6).gap(3).rounded(6).min_w(0).overflow_hidden()
         .bg(t.canvas).border(1).border_color(t.border)
