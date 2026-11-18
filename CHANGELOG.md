@@ -7,6 +7,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The `Magpie` layout, the `routing` mod and the `tabs-routing` mod are released
 together at one version.
 
+## [0.3.0] - 2026-11-19
+
+### New
+
+- **One-click update from the panel.** When a newer release is published, an
+  `↑ Update x.y.z` pill appears in the panel's top bar after `· n live`; it is
+  not drawn while the install is the newest release. Clicking it downloads the
+  release archive from GitHub, verifies its `sha256`, lays the files over
+  `~/.config/herdr-app` and lets Herdr reload the panel. Nothing is touched
+  unless the download and the checksum both pass, and `mods/routing/main.js` is
+  replaced last and in one step, so a failed update leaves the previous install
+  running. `mods/routing/config.json` is kept.
+- **When the mod looks for a release.** At start only if its last look is more
+  than 6 hours old; every 6 hours by the wall clock while it runs; when
+  **Refresh** is pressed, at most once in 10 minutes; after a failed look in 2,
+  10 and 30 minutes and then hourly, and as soon as the gateway is reachable
+  again. The answer is kept across reloads. A look is one `HEAD` request to
+  `github.com/dorokuma/herdr-magpie/releases/latest` from the machine Herdr runs
+  on; nothing is sent and no token is used. This is the first outbound request
+  the mod makes to anything but your gateway. Demo mode never looks.
+- **`mods/routing/VERSION`** ships with the mod and names the installed version.
+
+### Fixed
+
+- **A folded row averaged windows that stack.** An account with a `1 day` at
+  100% and a spent `7 days` read `50%` when folded, though it could not be used.
+  Windows on one allowance are no longer averaged: the longest window's share
+  stands for the allowance, and the row reads `Exhausted` as soon as any of its
+  windows is spent. Separate allowances of one account (two model pools, two
+  models) are still averaged.
+- **A folded row showed the wrong reset.** It showed the soonest reset of any
+  window, so the row above read `Resets in 16h` for an allowance that came back
+  in 3 days. It now shows the reset that goes with the number beside it.
+
+### Changed
+
+- Folded percentages of accounts with stacked windows read differently than in
+  `0.2.0`: `5 hours` 20% under `7 days` 80% is `80%`, where it was `50%`.
+
+### Upgrade
+
+Nothing to migrate. Installs of `0.2.0` and older have no update pill, so update
+once by hand — re-run `./install.sh` from a checkout of `v0.3.0`, or without a
+clone:
+
+```bash
+curl -fsSL https://github.com/dorokuma/herdr-magpie/releases/download/v0.3.0/herdr-magpie-0.3.0.tar.gz | tar xz -C /tmp
+/tmp/herdr-magpie-0.3.0/install.sh
+```
+
+Later releases arrive through the pill.
+
 ## [0.2.0] - 2026-11-18
 
 ### New

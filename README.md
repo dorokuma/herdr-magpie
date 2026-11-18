@@ -6,7 +6,7 @@
 
 **Live LLM routing topology, provider quota monitor, and request inspector for [Herdr](https://herdr.dev).**
 
-[![Release](https://img.shields.io/badge/release-v0.2.0-34d399?style=flat-square&labelColor=18181b)](https://github.com/dorokuma/herdr-magpie/releases)
+[![Release](https://img.shields.io/badge/release-v0.3.0-34d399?style=flat-square&labelColor=18181b)](https://github.com/dorokuma/herdr-magpie/releases)
 [![Herdr Layout & Mod](https://img.shields.io/badge/herdr-layout%20%26%20mod-5e95d7?style=flat-square&labelColor=18181b)](https://herdr.dev)
 [![GPUI Native](https://img.shields.io/badge/GPUI-native-d4b06a?style=flat-square&labelColor=18181b)](https://gpui-kit.com)
 [![License: MIT](https://img.shields.io/badge/license-MIT-a1a1aa?style=flat-square&labelColor=18181b)](LICENSE)
@@ -63,6 +63,38 @@ cd herdr-magpie
 chmod +x install.sh
 ./install.sh
 ```
+
+No clone needed either: a release archive carries the same installer.
+
+```bash
+curl -fsSL https://github.com/dorokuma/herdr-magpie/releases/download/v0.3.0/herdr-magpie-0.3.0.tar.gz | tar xz -C /tmp
+/tmp/herdr-magpie-0.3.0/install.sh
+```
+
+### Updating
+
+From `0.3.0` on the panel updates itself. When a newer release is published, an
+**`↑ Update x.y.z`** pill appears in the panel's top bar, right after `· n live`.
+Click it: the release archive is downloaded from GitHub, its `sha256` is
+verified, the files are laid over the install and Herdr reloads the panel. Your
+`mods/routing/config.json` (gateway, remote, demo) is kept, and so are your fold
+state and row order. While you are on the newest release the pill is not there.
+
+The mod looks for a release:
+
+- when the panel starts, if its last look is more than 6 hours old (a known
+  update shows at once from the kept answer, without asking again);
+- every 6 hours while it runs, by the wall clock, so a laptop that slept is
+  checked as it wakes;
+- when you press **Refresh** on Agent Quota, at most once in 10 minutes;
+- again after a look that failed: after 2, 10 and 30 minutes, then hourly, and
+  as soon as the gateway is reachable again.
+
+A look is one `HEAD` request to `github.com/dorokuma/herdr-magpie/releases/latest`
+from your own machine. Nothing is sent, no token is used, and demo mode never
+looks.
+
+Installs older than `0.3.0` have no pill: run the two lines above once.
 
 ### 2. Switch to the `Magpie` Layout
 

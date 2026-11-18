@@ -7,7 +7,7 @@
 
 import { View, div, svg, image, PathBuilder } from "gpui-kit";
 import { h_flex, v_flex, Scrollbar } from "gpui-base";
-import { theme, exec, settings, appHome, readTextFile } from "herdr";
+import { theme, exec, settings, appHome, readTextFile, notify } from "herdr";
 // `window` here is gpui-shell's global window object (its paint_path is an
 // element constructor), not herdr's window() — a function that only reports
 // metadata. Importing the herdr one shadows the global and breaks render.
@@ -15,6 +15,14 @@ import { theme, exec, settings, appHome, readTextFile } from "herdr";
 // Default connection target; overridden dynamically by mods/routing/config.json
 // or auto-detected from ~/.config/magpie/providers.json.
 const DEFAULT_BASE_URL = "http://127.0.0.1:3425";
+// Updates: Herdr has no package manager for a third-party mod, so this one
+// looks for its own releases. The look is one HEAD request that follows
+// github.com's releases/latest redirect -- no API token, no REST rate limit.
+const UPDATE_REPO = "dorokuma/herdr-magpie";
+const UPDATE_EVERY = 6 * 60 * 60 * 1000;   // the routine look, by the wall clock
+const UPDATE_ASKED = 10 * 60 * 1000;       // the floor between looks a person causes
+const UPDATE_RETRY = [2, 10, 30, 60].map((m) => m * 60 * 1000); // after a failed look
+const SEMVER = /^\d+\.\d+\.\d+$/;
 const FRAME = 40;          // ms between animation frames, only while flying
 const MAX_AGENTS = 4;      // the stage's four, as in magpie
 const MAX_ACCOUNTS = 6;
@@ -163,6 +171,14 @@ export default class Routing extends View {
     this.loadQuotaPrefs();
     this.traceBusy = false;
     this.lastSecTick = 0;
+    this.modVersion = "";    // mods/routing/VERSION, shipped beside main.js
+    // what the last look found and when, kept across reloads so a restart
+    // shows a known update at once and does not ask GitHub again
+    this.upd = { latest: "", checkedAt: 0, triedAt: 0, fails: 0, seen: "" };
+    this.updateChecking = false;
+    this.updateBusy = false;
+    this.updateError = "";
+    this.loadUpdateState();
     this.demo = false; // config.json's "demo": renders mods/routing/demo.json, asks no gateway
 
     cx.spawn(async (cx) => {
@@ -171,6 +187,9 @@ export default class Routing extends View {
       cx.spawn(async (cx2) => this.poll(cx2));
       cx.spawn(async (cx2) => this.pollQuota(cx2));
     });
+    // once a minute, against the wall clock rather than a long sleep: a laptop
+    // that slept through the night is overdue the moment it wakes
+    cx.timer.every(60000, (cx) => { this.maybeCheckUpdate(cx, "routine"); });
     cx.timer.every(FRAME, (cx) => {
       if (this.demo) return;
       const now = Date.now();
@@ -216,6 +235,11 @@ export default class Routing extends View {
     }
     this.configReady = true;
     this.discoverProviders().then(() => cx.notify()).catch(() => {});
+    this.readModVersion().then(() => {
+      this.announceVersion();
+      cx.notify();
+      this.maybeCheckUpdate(cx, "routine"); // asks GitHub only if the kept answer is stale
+    }).catch(() => {});
     cx.notify();
   }
 
@@ -325,6 +349,7 @@ export default class Routing extends View {
         for (const id of [...this.routes.keys()].sort((a, b) => a - b).slice(0, -60)) this.routes.delete(id);
         this.loaded = true;
         this.failCount = 0;
+        if (this.offline) this.maybeCheckUpdate(cx, "online");
         this.offline = "";
         this.recompute();
         cx.notify();
@@ -345,6 +370,46 @@ export default class Routing extends View {
     if (w?.remaining != null) return w.remaining;
     if (w?.used != null) return Math.max(0, 100 - w.used);
     return 100;
+  }
+
+  // How long a window runs, in hours, read off its name ("5 hours", "7 days",
+  // "Gemini · 7 days", "weekly"); null when the name is not a span of time.
+  winSpan(name) {
+    const tail = String(name || "").split("·").pop().trim().toLowerCase();
+    const word = { hourly: 1, daily: 24, weekly: 168, monthly: 720 }[tail];
+    if (word) return word;
+    const m = /^(\d+(?:\.\d+)?)\s*(min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks|mo|month|months)$/.exec(tail);
+    if (!m) return null;
+    const unit = m[2][0] === "h" ? 1 : m[2][0] === "d" ? 24 : m[2][0] === "w" ? 168 : m[2].startsWith("mo") ? 720 : 1 / 60;
+    return Number(m[1]) * unit;
+  }
+
+  // What one account has left, one answer per allowance. Windows that stack on
+  // the same allowance (5 hours inside 7 days) are not averaged: the longest
+  // one is the allowance, a shorter one only paces it. So the longest window's
+  // share stands for the allowance, and it is spent as soon as any of its
+  // windows is -- back when the last spent one resets. Windows that are not
+  // spans of time (one per model, one per meter) each stand alone.
+  allowances(windows) {
+    const stacks = new Map(), out = [];
+    for (const w of windows) {
+      const span = this.winSpan(w.name);
+      if (span == null) { out.push({ left: this.winLeft(w), resetsAt: w.resetsAt || "" }); continue; }
+      const key = (w.pool || (w.name.includes("·") ? w.name.split("·")[0] : "")).trim().toLowerCase();
+      if (!stacks.has(key)) stacks.set(key, []);
+      stacks.get(key).push({ w, span });
+    }
+    for (const stack of stacks.values()) {
+      const spent = stack.filter((s) => !s.w.unlimited && Math.round(this.winLeft(s.w)) <= 0);
+      if (spent.length) {
+        const resets = spent.map((s) => s.w.resetsAt).filter(Boolean).sort();
+        out.push({ left: 0, resetsAt: resets[resets.length - 1] || "" });
+        continue;
+      }
+      const longest = stack.reduce((a, b) => (b.span > a.span ? b : a));
+      out.push({ left: this.winLeft(longest.w), resetsAt: longest.w.resetsAt || "" });
+    }
+    return out;
   }
 
   normalizeQuotaItem(p, now = Date.now()) {
@@ -393,15 +458,22 @@ export default class Routing extends View {
     const hadText = Boolean(p?.hadText) || windows.some((w) => w.text);
     const nonTotal = shown.filter((w) => !/^total\s+credits$/i.test(w.name));
     const avgSource = nonTotal.length ? nonTotal : shown;
-    const shownLeft = (p?.left !== undefined && p?.left !== null && !(p?.windows || []).length)
-      ? p.left
-      : (baseProvider !== "cursor" && total) ? this.winLeft(total)
-      : avgSource.length ? avgSource.reduce((a, w) => a + this.winLeft(w), 0) / avgSource.length
+    const reported = p?.left !== undefined && p?.left !== null && !(p?.windows || []).length;
+    const byTotal = !reported && baseProvider !== "cursor" && Boolean(total);
+    const held = reported || byTotal ? [] : this.allowances(avgSource);
+    const shownLeft = reported ? p.left
+      : byTotal ? this.winLeft(total)
+      : held.length ? held.reduce((a, h) => a + h.left, 0) / held.length
       : null;
+    // the reset that goes with that number: the one that brings a spent
+    // allowance back, else the soonest among the allowances counted
+    const heldResets = held.map((h) => h.resetsAt).filter(Boolean).sort();
+    const leftResetsAt = held.length === 1 ? held[0].resetsAt : (heldResets[0] || "");
     return {
       provider,
       baseProvider,
       left: shownLeft,
+      leftResetsAt,
       name: p?.name || provider,
       plan: p?.plan || "",
       alias: p?.alias || "",
@@ -1107,6 +1179,208 @@ export default class Routing extends View {
     return Math.round((read / prompt) * 100);
   }
 
+  // ---- updates ---------------------------------------------------------
+  // The files under ~/.config/herdr-app are the install, so the mod updates
+  // itself the way the installer would: find the newest release, verify it,
+  // lay it down. Herdr's hot reload picks the new files up on its own.
+  //
+  // When GitHub is asked (never in demo mode, never twice at once):
+  //   start / reload   only when the kept answer is older than UPDATE_EVERY;
+  //                    a known update shows at once from the kept answer
+  //   routine          every UPDATE_EVERY, measured by the wall clock
+  //   asked            the person pressed Refresh: at most every UPDATE_ASKED
+  //   online           the gateway came back and the last look had failed
+  //   failed look      again after UPDATE_RETRY (2m, 10m, 30m, then hourly)
+  //   install          the release is resolved once more right before it is laid down
+  loadUpdateState() {
+    try {
+      const raw = typeof localStorage !== "undefined" ? localStorage.getItem("routing.update") : null;
+      if (!raw) return;
+      const d = JSON.parse(raw);
+      if (typeof d?.latest === "string" && SEMVER.test(d.latest)) this.upd.latest = d.latest;
+      if (Number.isFinite(d?.checkedAt)) this.upd.checkedAt = d.checkedAt;
+      if (Number.isFinite(d?.triedAt)) this.upd.triedAt = d.triedAt;
+      if (Number.isFinite(d?.fails)) this.upd.fails = d.fails;
+      if (typeof d?.seen === "string") this.upd.seen = d.seen;
+    } catch (_) { /* ignore storage errors */ }
+  }
+
+  saveUpdateState() {
+    try {
+      if (typeof localStorage === "undefined") return;
+      localStorage.setItem("routing.update", JSON.stringify(this.upd));
+    } catch (_) { /* ignore storage errors */ }
+  }
+
+  async readModVersion() {
+    try {
+      const v = ((await readTextFile(`${appHome()}/mods/routing/VERSION`)) || "").trim().replace(/^v/, "");
+      if (SEMVER.test(v)) this.modVersion = v;
+    } catch (_) { /* an install from before the file was shipped */ }
+  }
+
+  // The first frame after the version moved says so once, however it moved:
+  // the button here, install.sh, or a git checkout.
+  announceVersion() {
+    if (!this.modVersion) return;
+    this.loadUpdateState(); // another reload of this mod may already have said it
+    const was = this.upd.seen;
+    if (was === this.modVersion) return;
+    this.upd.seen = this.modVersion;
+    this.saveUpdateState();
+    if (was && this.newerThan(this.modVersion, was)) {
+      notify({ title: "herdr-magpie updated", level: "success", timeout: 6000,
+        body: `${was} → ${this.modVersion}` });
+    }
+  }
+
+  newerThan(a, b) {
+    const pa = String(a || "").split(".").map((n) => parseInt(n, 10) || 0);
+    const pb = String(b || "").split(".").map((n) => parseInt(n, 10) || 0);
+    for (let i = 0; i < 3; i++) {
+      const d = (pa[i] || 0) - (pb[i] || 0);
+      if (d) return d > 0;
+    }
+    return false;
+  }
+
+  updateReady() {
+    return Boolean(this.modVersion) && Boolean(this.upd.latest)
+      && this.newerThan(this.upd.latest, this.modVersion);
+  }
+
+  updateDue(reason, now) {
+    if (this.demo || !this.configReady || this.updateChecking || this.updateBusy) return false;
+    const u = this.upd;
+    const last = Math.max(u.checkedAt, u.triedAt);
+    if (last > now) return true; // the clock was set back: the kept times mean nothing
+    if (reason === "asked") return now - last >= UPDATE_ASKED;
+    if (reason === "online") return u.fails > 0 && now - u.triedAt >= 30000;
+    if (u.fails > 0) return now - u.triedAt >= UPDATE_RETRY[Math.min(u.fails, UPDATE_RETRY.length) - 1];
+    return now - u.checkedAt >= UPDATE_EVERY;
+  }
+
+  maybeCheckUpdate(cx, reason) {
+    if (!this.updateDue(reason, Date.now())) return;
+    this.checkLatest().then((moved) => { if (moved) cx.notify(); }).catch(() => {});
+  }
+
+  // releases/latest redirects to the newest published, non-draft, non-prerelease
+  // tag; the tag is read off the final address. Resolves to whether the answer moved.
+  async latestRelease() {
+    const r = await exec("curl", ["-fsSLI", "--max-time", "10", "-o", "/dev/null", "-w", "%{url_effective}",
+      `https://github.com/${UPDATE_REPO}/releases/latest`], { timeout: 15000 });
+    if (r.code !== 0) throw new Error((r.stderr || "").trim() || `curl exited ${r.code}`);
+    const m = /\/releases\/tag\/v?(\d+\.\d+\.\d+)\s*$/.exec(r.stdout || "");
+    return m ? m[1] : ""; // "": the repository has no release yet
+  }
+
+  async checkLatest() {
+    if (this.updateChecking) return false;
+    this.updateChecking = true;
+    const before = this.upd.latest;
+    this.upd.triedAt = Date.now();
+    try {
+      const v = await this.latestRelease();
+      this.upd.checkedAt = Date.now();
+      this.upd.fails = 0;
+      if (v) this.upd.latest = v;
+      if (v && v !== before) this.updateError = "";
+    } catch (_) {
+      this.upd.fails += 1; // offline or blocked: the kept answer stands, the retry is scheduled
+    } finally {
+      this.updateChecking = false;
+      this.saveUpdateState();
+    }
+    return this.upd.latest !== before;
+  }
+
+  // One shell run that leaves the last good install standing unless every step
+  // before the copy succeeded: the archive is fetched and unpacked in a
+  // temporary folder and its sha256 is verified before anything is touched.
+  // Files are laid over the install rather than replacing the folder, so what
+  // the release does not ship stays (mods/routing/config.json: the person's
+  // gateway, remote or demo pick). main.js goes last and by rename, so Herdr
+  // reloads once, onto a complete install.
+  updateScript(version) {
+    const q = (v) => `'${String(v).replace(/'/g, "'\\''")}'`;
+    return [
+      "set -eu",
+      `H=${q(appHome())}`,
+      `V=${q(version)}`,
+      `U="https://github.com/${UPDATE_REPO}/releases/download/v$V/herdr-magpie-$V.tar.gz"`,
+      'T=$(mktemp -d)',
+      'trap \'rm -rf "$T"\' EXIT',
+      // a connection to GitHub that drops mid-handshake is common on some
+      // networks; three tries each, in the shell so any curl can do it
+      'get() { n=0; until curl -fsSL --max-time "$1" -o "$2" "$3"; do'
+        + ' n=$((n+1)); [ "$n" -lt 3 ] || return 1; sleep 2; done; }',
+      'get 120 "$T/pkg.tgz" "$U"',
+      'get 20 "$T/pkg.sha256" "$U.sha256"',
+      'WANT=$(cut -d" " -f1 < "$T/pkg.sha256")',
+      'if command -v sha256sum >/dev/null 2>&1; then GOT=$(sha256sum "$T/pkg.tgz" | cut -d" " -f1);'
+        + ' else GOT=$(shasum -a 256 "$T/pkg.tgz" | cut -d" " -f1); fi',
+      '[ -n "$WANT" ] && [ "$WANT" = "$GOT" ] || { echo "checksum mismatch" >&2; exit 1; }',
+      'X="$T/x"; mkdir -p "$X"',
+      'tar xzf "$T/pkg.tgz" -C "$X" --strip-components=1',
+      '[ -f "$X/mods/routing/main.js" ] && [ -f "$X/mods/tabs-routing/main.js" ]'
+        + ' || { echo "the release is missing its mods" >&2; exit 1; }',
+      '[ -f "$X/mods/routing/VERSION" ] || printf "%s\\n" "$V" > "$X/mods/routing/VERSION"',
+      'mv "$X/mods/routing/main.js" "$T/main.js"',
+      'mkdir -p "$H/mods/routing" "$H/mods/tabs-routing" "$H/layouts"',
+      'cp -R "$X/mods/tabs-routing/." "$H/mods/tabs-routing/"',
+      'if [ -d "$X/layouts" ]; then cp -R "$X/layouts/." "$H/layouts/"; fi',
+      'cp -R "$X/mods/routing/." "$H/mods/routing/"',
+      'cp "$T/main.js" "$H/mods/routing/.main.js.new"',
+      'mv -f "$H/mods/routing/.main.js.new" "$H/mods/routing/main.js"',
+    ].join("\n");
+  }
+
+  async updateMod(cx) {
+    if (this.demo || this.updateBusy) return;
+    this.updateBusy = true;
+    this.updateError = "";
+    cx.notify();
+    try {
+      await this.checkLatest(); // a release may have landed since the button appeared
+      const v = this.upd.latest;
+      if (!SEMVER.test(v) || !this.newerThan(v, this.modVersion)) return; // nothing newer after all
+      const r = await exec("sh", ["-c", this.updateScript(v)], { timeout: 480000 });
+      if (r.code !== 0) throw new Error((r.stderr || "").trim().split("\n").pop() || `exited ${r.code}`);
+      // Herdr is reloading the mod onto the new files; if this instance is
+      // still the one drawn, it carries on as the new version
+      await this.readModVersion();
+      this.announceVersion();
+    } catch (e) {
+      this.updateError = String(e?.message ?? e).slice(0, 160);
+      notify({ title: "herdr-magpie update failed", level: "error", timeout: 9000,
+        body: `${this.updateError}\nhttps://github.com/${UPDATE_REPO}/releases/latest` });
+    } finally {
+      this.updateBusy = false;
+      cx.notify();
+    }
+  }
+
+  // The one control that is only there when it is needed: a pill in the top
+  // bar, after "· n live", that names the release it moves to. While the
+  // install is the newest release the bar is exactly as it was.
+  updatePill(t) {
+    if (this.demo || !this.updateReady()) return null;
+    const v = this.upd.latest;
+    const tip = `herdr-magpie ${this.modVersion} → ${v}\n`
+      + "Downloads the release from GitHub, checks its sha256 and installs it. "
+      + "The panel reloads by itself; your gateway settings are kept."
+      + (this.updateError ? `\n\nLast try failed: ${this.updateError}` : "");
+    return h_flex().id("mod-update").h(17).pl(6).pr(8).gap(3).rounded_full().items_center().flex_none()
+      .bg(t.accent).text_color(t.canvas)
+      .when(this.updateBusy, (el) => el.opacity(0.55))
+      .when(!this.updateBusy, (el) => el.cursor_pointer().hover((s) => s.opacity(0.85)))
+      .on_click((_, cx2) => { cx2.stop_propagation(); this.updateMod(cx2); })
+      .tooltip(tip)
+      .child(svg("mods/routing/icons/update.svg").size(10).flex_none().text_color(t.canvas))
+      .child(div().text_size(10).font_medium().child(this.updateBusy ? "Updating…" : `Update ${v}`));
+  }
+
   quotaPanel(t) {
     const W = this.size.width || 336;
     try {
@@ -1160,7 +1434,7 @@ export default class Routing extends View {
             return Date.parse(a.resetsAt || "9999") - Date.parse(b.resetsAt || "9999");
           })
           .slice(0, 10);
-        const nextReset = wins.map((w) => w.resetsAt).filter(Boolean).sort()[0];
+        const nextReset = q.leftResetsAt || wins.map((w) => w.resetsAt).filter(Boolean).sort()[0];
         const barRows = wins.map((w) => {
           const label = titleCase(w.name);
           const left = this.winLeft(w);
@@ -1460,6 +1734,7 @@ export default class Routing extends View {
             .on_click((_, cx2) => {
               cx2.stop_propagation();
               this.fetchQuotas(cx2).catch(() => {});
+              this.maybeCheckUpdate(cx2, "asked");
             })
             .child(this.quotaBusy ? "Refreshing…" : "Refresh")))
         .child(this.quotaOpen ? body : summaryRow);
@@ -1754,12 +2029,16 @@ export default class Routing extends View {
     if (recent.length) for (const r of recent) list.child(rowFor(r));
     else list.child(div().p(12).text_size(11).text_color(t.dim).child(filterLabel ? "No matching requests." : "No request yet."));
 
+    const updatePill = this.updatePill(t);
     return v_flex().size_full().bg(t.surface).text_color(t.foreground)
       .child(h_flex().px(12).pt(10).pb(6).gap(6).items_center()
         .child(div().text_size(13).font_semibold().child("Magpie"))
-        .child(div().text_size(11).text_color(t.accent).child(`· ${inFlight.length} live`))
+        .child(div().text_size(11).text_color(t.accent).flex_none().child(`· ${inFlight.length} live`))
+        .when(Boolean(updatePill), el => el
+          .child(div().text_size(11).text_color(t.dim).flex_none().child("·"))
+          .child(updatePill))
         .child(div().flex_1())
-        .child(div().text_size(9.5).text_color(t.dim).child(this.remoteLabel)))
+        .child(div().text_size(9.5).text_color(t.dim).min_w(0).truncate().child(this.remoteLabel)))
       .when(this.offline, el => el.child(div().px(12).py(16).text_size(11.5).text_color(t.muted).child(this.offline)))
       .when(!this.offline, el => el
         .child(div().mx(10).mb(8).p(6).rounded(10).bg(t.canvas).border(1).border_color(t.border)

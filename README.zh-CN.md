@@ -6,7 +6,7 @@
 
 **面向 [Herdr](https://herdr.dev) 的 Magpie 实时路由拓扑、供应商配额监控与请求追踪面板。**
 
-[![Release](https://img.shields.io/badge/release-v0.2.0-34d399?style=flat-square&labelColor=18181b)](https://github.com/dorokuma/herdr-magpie/releases)
+[![Release](https://img.shields.io/badge/release-v0.3.0-34d399?style=flat-square&labelColor=18181b)](https://github.com/dorokuma/herdr-magpie/releases)
 [![Herdr Layout & Mod](https://img.shields.io/badge/herdr-layout%20%26%20mod-5e95d7?style=flat-square&labelColor=18181b)](https://herdr.dev)
 [![GPUI Native](https://img.shields.io/badge/GPUI-native-d4b06a?style=flat-square&labelColor=18181b)](https://gpui-kit.com)
 [![License: MIT](https://img.shields.io/badge/license-MIT-a1a1aa?style=flat-square&labelColor=18181b)](LICENSE)
@@ -39,7 +39,33 @@ chmod +x install.sh
 ./install.sh
 ```
 
+也可以不克隆仓库，直接用发布包里的同一个安装脚本：
+
+```bash
+curl -fsSL https://github.com/dorokuma/herdr-magpie/releases/download/v0.3.0/herdr-magpie-0.3.0.tar.gz | tar xz -C /tmp
+/tmp/herdr-magpie-0.3.0/install.sh
+```
+
 安装完成后，在 Herdr 中按 `Ctrl+Shift+L`（或在 **Settings → Look → Layout** 中选择 **Magpie**），再点击右上角标签栏的 **Routing** 按钮即可展开面板。
+
+## 更新
+
+从 `0.3.0` 起面板可以自己更新。有新版本发布时，面板顶栏 `· n live` 后面会出现
+**`↑ Update x.y.z`** 按钮；点一下，它会从 GitHub 下载发布包、校验 `sha256`、把文件铺到
+安装目录，Herdr 随即自动重载面板。你的 `mods/routing/config.json`（网关、远端、演示模式）
+以及折叠状态、排序都会保留。已经是最新版本时，这个按钮不会出现。
+
+检查新版本的时机：
+
+- 面板启动时，仅当距上次检查超过 6 小时（已知的更新会直接从缓存结果显示，不重复请求）；
+- 运行期间每 6 小时一次，按系统时钟计算，所以笔记本休眠唤醒后会立刻补查；
+- 点击 Agent Quota 的 **Refresh** 时，最多每 10 分钟一次；
+- 检查失败后依次在 2、10、30 分钟后重试，之后每小时一次；网关恢复可达时也会立刻重试。
+
+一次检查只是从本机向 `github.com/dorokuma/herdr-magpie/releases/latest` 发一个 `HEAD`
+请求，不上传任何数据、不需要 token；演示模式下从不检查。
+
+早于 `0.3.0` 的安装没有这个按钮，按上面两行命令手动更新一次即可。
 
 ## 远端网关配置（可选）
 
