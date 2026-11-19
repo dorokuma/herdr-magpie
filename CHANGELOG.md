@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The `Magpie` layout, the `routing` mod and the `tabs-routing` mod are released
 together at one version.
 
+## [0.3.1] - 2026-11-19
+
+### Fixed
+
+- **`· 0 live` no longer shows.** The panel's top bar now draws the live request count only when a request is actually in flight, so an idle install reads just `Magpie` (and the update pill, if one is waiting).
+
+### Upgrade
+
+Nothing to migrate. Copy the new `mods/routing` into `~/.config/herdr-app/mods/`, or re-run `./install.sh`; later releases arrive through the pill.
+
 ## [0.3.0] - 2026-11-19
 
 ### New

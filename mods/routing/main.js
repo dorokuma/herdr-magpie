@@ -2033,7 +2033,8 @@ export default class Routing extends View {
     return v_flex().size_full().bg(t.surface).text_color(t.foreground)
       .child(h_flex().px(12).pt(10).pb(6).gap(6).items_center()
         .child(div().text_size(13).font_semibold().child("Magpie"))
-        .child(div().text_size(11).text_color(t.accent).flex_none().child(`· ${inFlight.length} live`))
+        .when(inFlight.length > 0, el => el
+          .child(div().text_size(11).text_color(t.accent).flex_none().child(`· ${inFlight.length} live`)))
         .when(Boolean(updatePill), el => el
           .child(div().text_size(11).text_color(t.dim).flex_none().child("·"))
           .child(updatePill))

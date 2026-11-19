@@ -6,7 +6,7 @@
 
 **Live LLM routing topology, provider quota monitor, and request inspector for [Herdr](https://herdr.dev).**
 
-[![Release](https://img.shields.io/badge/release-v0.3.0-34d399?style=flat-square&labelColor=18181b)](https://github.com/dorokuma/herdr-magpie/releases)
+[![Release](https://img.shields.io/badge/release-v0.3.1-34d399?style=flat-square&labelColor=18181b)](https://github.com/dorokuma/herdr-magpie/releases)
 [![Herdr Layout & Mod](https://img.shields.io/badge/herdr-layout%20%26%20mod-5e95d7?style=flat-square&labelColor=18181b)](https://herdr.dev)
 [![GPUI Native](https://img.shields.io/badge/GPUI-native-d4b06a?style=flat-square&labelColor=18181b)](https://gpui-kit.com)
 [![License: MIT](https://img.shields.io/badge/license-MIT-a1a1aa?style=flat-square&labelColor=18181b)](LICENSE)
@@ -67,14 +67,14 @@ chmod +x install.sh
 No clone needed either: a release archive carries the same installer.
 
 ```bash
-curl -fsSL https://github.com/dorokuma/herdr-magpie/releases/download/v0.3.0/herdr-magpie-0.3.0.tar.gz | tar xz -C /tmp
-/tmp/herdr-magpie-0.3.0/install.sh
+curl -fsSL https://github.com/dorokuma/herdr-magpie/releases/download/v0.3.1/herdr-magpie-0.3.1.tar.gz | tar xz -C /tmp
+/tmp/herdr-magpie-0.3.1/install.sh
 ```
 
 ### Updating
 
-From `0.3.0` on the panel updates itself. When a newer release is published, an
-**`↑ Update x.y.z`** pill appears in the panel's top bar, right after `· n live`.
+From `0.3.0` on the panel updates itself. When a newer release is published, a `· n live` count is drawn for the requests in flight and an
+**`↑ Update x.y.z`** pill follows it; with nothing in flight the count is not drawn.
 Click it: the release archive is downloaded from GitHub, its `sha256` is
 verified, the files are laid over the install and Herdr reloads the panel. Your
 `mods/routing/config.json` (gateway, remote, demo) is kept, and so are your fold
