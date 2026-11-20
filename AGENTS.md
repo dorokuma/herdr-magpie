@@ -17,4 +17,5 @@
 ### Repository-specific release contract
 
 - 本仓的 layout、routing mod 与 tabs-routing mod 必须以同一版本发布；Release Notes 必须列出布局/模组变化及安装、升级方式。
+- 版本号只写在三处：根目录 `VERSION`、`mods/routing/VERSION`、`CHANGELOG.md`。README 的徽章与安装命令读取 `releases/latest`，不得写入具体版本号；发版时只改这三处。仅修改 README/RECIPE 等文档、不改变任何被安装文件时不发新版本，记入 CHANGELOG 的 `[Unreleased]`，随下一个版本一并发布。
 - 面板内的一键更新依赖发布产物的形状，以下任一项不满足都会让所有用户的更新按钮失效：`mods/routing/VERSION` 必须与根目录 `VERSION` 相同并随发布提交入库；每个 Release 必须上传 `herdr-magpie-X.Y.Z.tar.gz`（`git archive --prefix=herdr-magpie-X.Y.Z/` 自 Tag 生成）及同名 `.sha256`；Tag 必须是 `vX.Y.Z`；Release 不得为 draft 或 prerelease（更新检查读取 `releases/latest`）。

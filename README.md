@@ -6,7 +6,7 @@
 
 **Live LLM routing topology, provider quota monitor, and request inspector for [Herdr](https://herdr.dev).**
 
-[![Release](https://img.shields.io/badge/release-v0.3.2-34d399?style=flat-square&labelColor=18181b)](https://github.com/dorokuma/herdr-magpie/releases)
+[![Release](https://img.shields.io/github/v/release/dorokuma/herdr-magpie?style=flat-square&labelColor=18181b&color=34d399)](https://github.com/dorokuma/herdr-magpie/releases)
 [![Herdr Layout & Mod](https://img.shields.io/badge/herdr-layout%20%26%20mod-5e95d7?style=flat-square&labelColor=18181b)](https://herdr.dev)
 [![GPUI Native](https://img.shields.io/badge/GPUI-native-d4b06a?style=flat-square&labelColor=18181b)](https://gpui-kit.com)
 [![License: MIT](https://img.shields.io/badge/license-MIT-a1a1aa?style=flat-square&labelColor=18181b)](LICENSE)
@@ -64,11 +64,11 @@ chmod +x install.sh
 ./install.sh
 ```
 
-No clone needed either: a release archive carries the same installer.
+No clone needed either: a release archive carries the same installer. These two lines always fetch the latest release.
 
 ```bash
-curl -fsSL https://github.com/dorokuma/herdr-magpie/releases/download/v0.3.2/herdr-magpie-0.3.2.tar.gz | tar xz -C /tmp
-/tmp/herdr-magpie-0.3.2/install.sh
+V=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/dorokuma/herdr-magpie/releases/latest | sed 's|.*/v||')
+curl -fsSL "https://github.com/dorokuma/herdr-magpie/releases/download/v$V/herdr-magpie-$V.tar.gz" | tar xz -C /tmp && "/tmp/herdr-magpie-$V/install.sh"
 ```
 
 ### Updating

@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The `Magpie` layout, the `routing` mod and the `tabs-routing` mod are released
 together at one version.
 
+## [Unreleased]
+
+### Docs
+
+- The READMEs no longer name a version. The release badge reads the latest GitHub Release, and the no-clone install lines resolve `releases/latest` themselves, so neither needs editing at each release. Documentation only: nothing that gets installed changed, so no version was cut for it.
+
 ## [0.3.2] - 2026-11-20
 
 ### Changed

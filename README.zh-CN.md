@@ -6,7 +6,7 @@
 
 **面向 [Herdr](https://herdr.dev) 的 Magpie 实时路由拓扑、供应商配额监控与请求追踪面板。**
 
-[![Release](https://img.shields.io/badge/release-v0.3.2-34d399?style=flat-square&labelColor=18181b)](https://github.com/dorokuma/herdr-magpie/releases)
+[![Release](https://img.shields.io/github/v/release/dorokuma/herdr-magpie?style=flat-square&labelColor=18181b&color=34d399)](https://github.com/dorokuma/herdr-magpie/releases)
 [![Herdr Layout & Mod](https://img.shields.io/badge/herdr-layout%20%26%20mod-5e95d7?style=flat-square&labelColor=18181b)](https://herdr.dev)
 [![GPUI Native](https://img.shields.io/badge/GPUI-native-d4b06a?style=flat-square&labelColor=18181b)](https://gpui-kit.com)
 [![License: MIT](https://img.shields.io/badge/license-MIT-a1a1aa?style=flat-square&labelColor=18181b)](LICENSE)
@@ -39,11 +39,11 @@ chmod +x install.sh
 ./install.sh
 ```
 
-也可以不克隆仓库，直接用发布包里的同一个安装脚本：
+也可以不克隆仓库，直接用发布包里的同一个安装脚本。下面两行始终安装最新发布版：
 
 ```bash
-curl -fsSL https://github.com/dorokuma/herdr-magpie/releases/download/v0.3.2/herdr-magpie-0.3.2.tar.gz | tar xz -C /tmp
-/tmp/herdr-magpie-0.3.2/install.sh
+V=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/dorokuma/herdr-magpie/releases/latest | sed 's|.*/v||')
+curl -fsSL "https://github.com/dorokuma/herdr-magpie/releases/download/v$V/herdr-magpie-$V.tar.gz" | tar xz -C /tmp && "/tmp/herdr-magpie-$V/install.sh"
 ```
 
 安装完成后，在 Herdr 中按 `Ctrl+Shift+L`（或在 **Settings → Look → Layout** 中选择 **Magpie**），再点击右上角标签栏的 **Routing** 按钮即可展开面板。
