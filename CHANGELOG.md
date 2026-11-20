@@ -7,6 +7,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The `Magpie` layout, the `routing` mod and the `tabs-routing` mod are released
 together at one version.
 
+## [0.3.2] - 2026-11-20
+
+### Changed
+
+- **One `Requests` header instead of three stacked labels.** `REQUESTS`, `IN FLIGHT n` and `RECENT n` are replaced by a single header that carries the counts: `Requests 2 active · 40 recent`. The list no longer jumps when a request starts or finishes; active requests still lead it, marked by their gold dot. The header, the rows and the empty state now share one left edge, and an agent/provider filter chip sits right after the title.
+- **`in flight` is now `active`**, in the header and in a request's expanded try list.
+- **The top bar no longer counts live requests.** `· n live` repeated the number the `Requests` header now shows, so it is gone; the `↑ Update x.y.z` pill follows the `Magpie` title directly.
+
+### Fixed
+
+- **A folded provider no longer shows a made-up percentage.** The folded reading is now the same for every provider: percentages only, the short window first and the long one after it, each in its own red / amber / green -- `71% · 96%` for 5 hours inside 7 days.
+  - Long window empty: `Exhausted`, however full the short window reports. Nothing can be called until the long one resets, and the reset shown is that one.
+  - Only the short window empty: `0% · 80%`, with the short window's reset.
+  - A provider with several pools (one per model family) shows the tightest pool in each column. It used to average the pools into a share none of them had.
+  - The summary strip shows one number: the long window, or `0%` when the short one is what blocks calls.
+
+### Upgrade
+
+Nothing to migrate. From `0.3.0` or `0.3.1`, click the `↑ Update 0.3.2` pill in the panel's top bar. Older installs: copy the new `mods/routing` into `~/.config/herdr-app/mods/`, or re-run `./install.sh`.
+
 ## [0.3.1] - 2026-11-19
 
 ### Fixed

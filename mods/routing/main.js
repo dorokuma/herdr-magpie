@@ -385,31 +385,78 @@ export default class Routing extends View {
   }
 
   // What one account has left, one answer per allowance. Windows that stack on
-  // the same allowance (5 hours inside 7 days) are not averaged: the longest
-  // one is the allowance, a shorter one only paces it. So the longest window's
-  // share stands for the allowance, and it is spent as soon as any of its
-  // windows is -- back when the last spent one resets. Windows that are not
-  // spans of time (one per model, one per meter) each stand alone.
+  // the same allowance (5 hours inside 7 days) are never averaged: the longest
+  // one is the allowance (`long`), the shortest only paces it (`pace`). The
+  // allowance is spent as soon as any of its windows is -- back when the last
+  // spent one resets -- so `left` is 0 then, however full the others report.
+  // `state` says which: "spent" when the longest window is empty, "paused"
+  // when only a shorter one is. Windows that are not spans of time (one per
+  // model, one per meter) each stand alone.
   allowances(windows) {
     const stacks = new Map(), out = [];
     for (const w of windows) {
       const span = this.winSpan(w.name);
-      if (span == null) { out.push({ left: this.winLeft(w), resetsAt: w.resetsAt || "" }); continue; }
+      if (span == null) {
+        const left = this.winLeft(w);
+        out.push({ label: `w:${String(w.name || "").toLowerCase()}`, left, resetsAt: w.resetsAt || "",
+          long: null, pace: null, state: !w.unlimited && Math.round(left) <= 0 ? "spent" : "ok" });
+        continue;
+      }
       const key = (w.pool || (w.name.includes("·") ? w.name.split("·")[0] : "")).trim().toLowerCase();
       if (!stacks.has(key)) stacks.set(key, []);
       stacks.get(key).push({ w, span });
     }
-    for (const stack of stacks.values()) {
-      const spent = stack.filter((s) => !s.w.unlimited && Math.round(this.winLeft(s.w)) <= 0);
-      if (spent.length) {
-        const resets = spent.map((s) => s.w.resetsAt).filter(Boolean).sort();
-        out.push({ left: 0, resetsAt: resets[resets.length - 1] || "" });
-        continue;
-      }
+    for (const [key, stack] of stacks) {
       const longest = stack.reduce((a, b) => (b.span > a.span ? b : a));
-      out.push({ left: this.winLeft(longest.w), resetsAt: longest.w.resetsAt || "" });
+      const shortest = stack.reduce((a, b) => (b.span < a.span ? b : a));
+      const part = (s) => ({ left: this.winLeft(s.w), resetsAt: s.w.resetsAt || "" });
+      const isSpent = (s) => !s.w.unlimited && Math.round(this.winLeft(s.w)) <= 0;
+      const spent = stack.filter(isSpent);
+      const resets = spent.map((s) => s.w.resetsAt).filter(Boolean).sort();
+      out.push({
+        label: `s:${key}`,
+        left: spent.length ? 0 : this.winLeft(longest.w),
+        resetsAt: spent.length ? (resets[resets.length - 1] || "") : (longest.w.resetsAt || ""),
+        long: part(longest),
+        pace: shortest === longest ? null : part(shortest),
+        state: isSpent(longest) ? "spent" : spent.length ? "paused" : "ok",
+      });
     }
     return out;
+  }
+
+  // The folded reading of a set of allowances, as coloured pieces of text:
+  // percentages only, the short window first and the long one after it, the
+  // same for every provider.
+  //  - one window:                  "75%"
+  //  - 5 hours inside 7 days:       "71% · 96%" -- each in its own
+  //    traffic-light colour
+  //  - only the short window empty: "0% · 80%"
+  //  - several allowances (one per model pool): each column shows its
+  //    tightest pool, so a pool running out is never averaged away
+  //  - nothing left to call (every allowance's long window is empty):
+  //    "Exhausted", however full the short windows report
+  // `compact` is the one-number form for the summary strip.
+  quotaRead(allows, compact = false) {
+    const RED = "#e26a6a", GOLD = "#d4b06a", GREEN = "#34d399";
+    const tone = (v) => (v < 10 ? RED : v < 30 ? GOLD : GREEN);
+    const pct = (v) => Math.max(0, Math.round(v));
+    if (!allows?.length) return null;
+    if (allows.every((a) => a.state === "spent")) {
+      return { segs: [{ text: compact ? "0%" : "Exhausted", color: RED, strong: true }] };
+    }
+    const long = Math.min(...allows.map((a) => pct(a.long ? a.long.left : a.left)));
+    const paces = allows.filter((a) => a.pace).map((a) => pct(a.pace.left));
+    const pace = paces.length ? Math.min(...paces) : null;
+    if (pace == null || compact) {
+      const v = pace === 0 ? 0 : long; // a spent short window blocks calls too
+      return { segs: [{ text: `${v}%`, color: tone(v), strong: true }] };
+    }
+    return { segs: [
+      { text: `${pace}%`, color: tone(pace), strong: true },
+      { text: "·", color: null, sep: true },
+      { text: `${long}%`, color: tone(long), strong: true },
+    ] };
   }
 
   normalizeQuotaItem(p, now = Date.now()) {
@@ -460,19 +507,24 @@ export default class Routing extends View {
     const avgSource = nonTotal.length ? nonTotal : shown;
     const reported = p?.left !== undefined && p?.left !== null && !(p?.windows || []).length;
     const byTotal = !reported && baseProvider !== "cursor" && Boolean(total);
+    const single = (left, resetsAt) => [{ label: "s:", left, resetsAt: resetsAt || "", long: null, pace: null,
+      state: Math.round(left) <= 0 ? "spent" : "ok" }];
     const held = reported || byTotal ? [] : this.allowances(avgSource);
-    const shownLeft = reported ? p.left
-      : byTotal ? this.winLeft(total)
-      : held.length ? held.reduce((a, h) => a + h.left, 0) / held.length
-      : null;
+    const allow = reported ? single(Number(p.left)) : byTotal ? single(this.winLeft(total), total.resetsAt) : held;
+    // one number for the dot and for ordering: the scarcest allowance. It is
+    // never drawn as "the" share when there are several (see quotaRead).
+    const shownLeft = allow.length ? Math.min(...allow.map((h) => h.left)) : null;
     // the reset that goes with that number: the one that brings a spent
     // allowance back, else the soonest among the allowances counted
     const heldResets = held.map((h) => h.resetsAt).filter(Boolean).sort();
-    const leftResetsAt = held.length === 1 ? held[0].resetsAt : (heldResets[0] || "");
+    // several allowances: a blocked one is what the reader is waiting for
+    const blockedResets = held.filter((h) => Math.round(h.left) <= 0).map((h) => h.resetsAt).filter(Boolean).sort();
+    const leftResetsAt = held.length === 1 ? held[0].resetsAt : (blockedResets[0] || heldResets[0] || "");
     return {
       provider,
       baseProvider,
       left: shownLeft,
+      allow,
       leftResetsAt,
       name: p?.name || provider,
       plan: p?.plan || "",
@@ -1129,8 +1181,9 @@ export default class Routing extends View {
   }
 
   /* The rendered page is the original Magpie panel: a titled preview card
-   * (the wires + the flying bird), then the request list under REQUESTS,
-   * then a single-line footer. Rows split IN FLIGHT / RECENT. */
+   * (the wires + the flying bird), then the request list under one
+   * "Requests" header that carries the counts, then a single-line footer.
+   * Active rows lead the list; their gold dot is what sets them apart. */
 
   fmtTok(n) {
     if (!n) return "—";
@@ -1401,24 +1454,42 @@ export default class Routing extends View {
       const creditRank = (name) => /^credits$/i.test(name) ? 0
         : /^extra\s+credits$/i.test(name) ? 1
         : /^total\s+credits$/i.test(name) ? 2 : -1;
+      // A provider's accounts are alternative seats on the same allowances, so
+      // the provider holds, per allowance, whatever its best-off account holds.
       const summarizeGroup = (group) => {
         const accts = group.accounts || [];
-        const lefts = accts.map((a) => a.left).filter((v) => v != null);
-        const bestLeft = lefts.length ? Math.max(...lefts) : null;
-        const bestBalance = bestLeft == null ? (accts.find((a) => a.balance)?.balance || "") : "";
-        const allErr = bestLeft == null && !bestBalance && accts.length > 0 && accts.every((a) => Boolean(a.error));
-        return { bestLeft, bestBalance, allErr, count: accts.length };
-      };
-      const acctStatusBadge = (q) => {
-        if (q.left != null) {
-          const pct = Math.round(q.left);
-          const color = q.left < 10 ? "#e26a6a" : q.left < 30 ? "#d4b06a" : "#34d399";
-          return { text: pct <= 0 ? "Exhausted" : `${pct}%`, color };
+        const best = new Map();
+        // accounts that each hold one allowance hold the same one, whatever
+        // the gateway called its window on each of them
+        const oneEach = accts.every((a) => (a.allow || []).length <= 1);
+        for (const a of accts) for (const h of a.allow || []) {
+          const label = oneEach ? "" : h.label;
+          const cur = best.get(label);
+          const better = !cur || h.left > cur.left
+            || (h.left === cur.left && (h.long?.left ?? 0) > (cur.long?.left ?? 0));
+          if (better) best.set(label, h);
         }
-        if (q.balance) return { text: String(q.balance), color: "#34d399" };
-        if (q.error) return { text: "Error", color: "#e26a6a" };
-        return { text: "Ready", color: "#34d399" };
+        const allow = [...best.values()];
+        const bestBalance = allow.length ? "" : (accts.find((a) => a.balance)?.balance || "");
+        const allErr = !allow.length && !bestBalance && accts.length > 0 && accts.every((a) => Boolean(a.error));
+        return { allow, bestBalance, allErr, count: accts.length };
       };
+      // the pieces of a quotaRead, set side by side
+      const readEl = (read, size) => h_flex().items_center().flex_none()
+        .children(read.segs.map((g) => div().text_size(size).flex_none()
+          .when(Boolean(g.sep), (el) => el.px(3))
+          .text_color(g.color || (g.sep ? t.dim : t.muted))
+          .when(Boolean(g.strong), (el) => el.font_semibold())
+          .child(g.text)));
+      const plainEl = (text, color, size) => div().text_size(size).font_semibold().text_color(color).flex_none().child(text);
+      const statusEl = (allow, balance, error, size, compact = false) => {
+        const read = this.quotaRead(allow, compact);
+        if (read) return readEl(read, size);
+        if (balance) return plainEl(String(balance), "#34d399", size);
+        if (error) return plainEl("Error", "#e26a6a", size);
+        return plainEl("Ready", "#34d399", size);
+      };
+      const acctStatusBadge = (q) => statusEl(q.allow, q.balance, q.error, 8.5);
       const buildAccountBars = (q, wName) => {
         const wins = (q.windows || []).filter((w) => !w.text)
           .sort((a, b) => {
@@ -1517,7 +1588,7 @@ export default class Routing extends View {
               .child(div().text_size(10.5).font_semibold().truncate().flex_1().min_w(0).child(String(group.name || id)))
               .when(Boolean(badge), (el) => el.child(div().text_size(8.5).text_color(t.dim).flex_none().child(`· ${badge}`)))
               .when(Boolean(who), (el) => el.child(div().text_size(8.5).text_color(t.muted).flex_none().max_w(90).truncate().child(`· ${who}`)))
-              .when(Boolean(foldedStatus), (el) => el.child(div().text_size(8.5).font_semibold().text_color(foldedStatus.color).flex_none().child(foldedStatus.text)))
+              .when(Boolean(foldedStatus), (el) => el.child(foldedStatus))
               .child(div().text_size(9).text_color(t.dim).flex_none()
                 .child(nextReset ? `Resets ${this.fmtUntil(nextReset)}` : "")))
             .when(!provFolded, (el) => el.child(v_flex().pl(24).pr(4).gap(2).children(barRows)))
@@ -1585,7 +1656,7 @@ export default class Routing extends View {
               .child(div().size(5).rounded(2.5).bg(dotColor).flex_none())
               .child(div().text_size(9.5).font_semibold().text_color(t.foreground).truncate().flex_1().min_w(0).child(acctLabel))
               .when(Boolean(acctPlan), (el) => el.child(div().text_size(8.5).text_color(t.dim).flex_none().child(`· ${acctPlan}`)))
-              .when(Boolean(acctStatus), (el) => el.child(div().text_size(8.5).font_semibold().text_color(acctStatus.color).flex_none().child(acctStatus.text)))
+              .when(Boolean(acctStatus), (el) => el.child(acctStatus))
               .child(div().text_size(8.5).text_color(t.dim).flex_none()
                 .child(nextReset ? `Resets ${this.fmtUntil(nextReset)}` : "")))
             .when(!acctFolded, (el) => el.child(v_flex().pl(16).pr(4).gap(2).children(barRows)))
@@ -1597,15 +1668,8 @@ export default class Routing extends View {
         });
 
         const grpSummary = provFolded ? summarizeGroup(group) : null;
-        const grpPct = grpSummary && grpSummary.bestLeft != null ? Math.round(grpSummary.bestLeft) : null;
-        const grpVal = !grpSummary ? ""
-          : grpPct != null ? (grpPct <= 0 ? "Exhausted" : `${grpPct}%`)
-          : grpSummary.bestBalance ? String(grpSummary.bestBalance)
-          : grpSummary.allErr ? "Error" : "Ready";
-        const grpCol = !grpSummary ? t.dim
-          : grpSummary.allErr ? "#e26a6a"
-          : grpPct == null ? "#34d399"
-          : grpPct < 10 ? "#e26a6a" : grpPct < 30 ? "#d4b06a" : "#34d399";
+        const grpEl = grpSummary
+          ? statusEl(grpSummary.allow, grpSummary.bestBalance, grpSummary.allErr, 8.5) : null;
 
         rows.push(v_flex().relative().id(`quota-prov-${id}`).gap(3)
           .when(provDragging, (el) => el.opacity(0.45))
@@ -1647,7 +1711,7 @@ export default class Routing extends View {
             .child(iconEl(id, 14, t.muted, this.providerIcons))
             .child(div().text_size(10.5).font_semibold().truncate().flex_1().min_w(0).child(String(group.name || id)))
             .when(Boolean(sharedPlan), (el) => el.child(div().text_size(8.5).text_color(t.dim).flex_none().child(`· ${sharedPlan}`)))
-            .when(Boolean(grpVal), (el) => el.child(div().text_size(8.5).font_semibold().text_color(grpCol).flex_none().child(grpVal)))
+            .when(Boolean(grpEl), (el) => el.child(grpEl))
             .child(div().text_size(8.5).text_color(t.dim).flex_none().child(`${accounts.length} Accounts`)))
           .when(!provFolded, (el) => el.child(v_flex().pl(14).gap(5).children(subBlocks)))
           .when(provDropTarget, (el) => el.child(
@@ -1689,19 +1753,16 @@ export default class Routing extends View {
       };
       const withMetrics = providers.map(([id, g]) => [id, g, summarizeGroup(g)]);
       const chipProviders = withMetrics
-        .filter(([, , s]) => s.bestLeft != null || s.bestBalance)
-        .concat(withMetrics.filter(([, , s]) => s.bestLeft == null && !s.bestBalance && !s.allErr))
+        .filter(([, , s]) => s.allow.length || s.bestBalance)
+        .concat(withMetrics.filter(([, , s]) => !s.allow.length && !s.bestBalance && !s.allErr))
         .concat(withMetrics.filter(([, , s]) => s.allErr))
         .slice(0, 4);
       const summaryChips = chipProviders.map(([id, group, s]) => {
-        const pct = s.bestLeft != null ? Math.round(s.bestLeft) : null;
-        const val = pct != null ? `${pct}%` : (s.bestBalance ? String(s.bestBalance) : (s.allErr ? "Error" : "Ready"));
-        const valColor = s.allErr ? "#e26a6a" : pct == null ? "#34d399" : pct < 10 ? "#e26a6a" : pct < 30 ? "#d4b06a" : "#34d399";
         return h_flex().items_center().gap(4).flex_none()
           .child(iconEl(id, 11, t.muted, this.providerIcons))
           .child(div().text_size(9).text_color(t.muted).max_w(s.count > 1 ? 62 : 76).truncate().child(shortName(id, group.name)))
           .when(s.count > 1, (el) => el.child(div().text_size(8).text_color(t.dim).child(`×${s.count}`)))
-          .child(div().text_size(9).font_semibold().text_color(valColor).child(val));
+          .child(statusEl(s.allow, s.bestBalance, s.allErr, 9, true));
       });
       const summaryRow = h_flex().px(10).pb(8).gap(8).items_center().overflow_hidden().cursor_pointer()
         .on_click((_, cx2) => { this.quotaOpen = true; this.saveQuotaPrefs(); cx2.notify(); })
@@ -1959,7 +2020,7 @@ export default class Routing extends View {
         ? `${retry}${this.fmtTok(r.tokens)} tokens · ${this.fmtMs(r.ms)}${tps && tps !== "—" ? ` · ${tps}` : ""}${cache != null ? ` · ${cache}% cached` : ""}`
         : `${retry}${this.fmtElapsed(now - new Date(r.time).getTime())}…`;
       // the state dot and the seat's name share the request's colour:
-      // gold in flight, green answered, red failed — magpie's row read
+      // gold active, green answered, red failed — magpie's row read
       const failed = r.done && r.status && r.status >= 400;
       const whoColor = !r.done ? "#d4b06a" : failed ? "#e26a6a" : "#34d399";
       const dotColor = !r.done ? "#facc15" : failed ? "#e26a6a" : "#34d399";
@@ -1983,14 +2044,14 @@ export default class Routing extends View {
           const tName = tSeat?.name || tr.name || tr.id || "?";
           const tFail = tr.done && tr.status && tr.status >= 400;
           const tCol = !tr.done ? "#facc15" : tFail ? "#e26a6a" : "#34d399";
-          const tStat = !tr.done ? "in flight" : `${tr.status || "ok"}${tr.ms ? ` · ${this.fmtMs(tr.ms)}` : ""}`;
+          const tStat = !tr.done ? "active" : `${tr.status || "ok"}${tr.ms ? ` · ${this.fmtMs(tr.ms)}` : ""}`;
           return h_flex().gap(6).items_center().text_size(9.5).min_w(0)
             .child(div().text_color(t.dim).flex_none().child(`#${idx + 1}`))
             .child(div().size(4).rounded(2).bg(tCol).flex_none())
             .child(div().text_color(t.foreground).truncate().flex_1().min_w(0).child(tName))
             .child(div().text_color(tFail ? "#e26a6a" : t.dim).flex_none().child(tStat));
         })) : null;
-      return v_flex().id(`req-row-${r.id}`).gap(3).py(7).min_w(0).border_b(1).border_color(t.border)
+      return v_flex().id(`req-row-${r.id}`).gap(3).px(2).py(7).min_w(0).border_b(1).border_color(t.border)
         .cursor_pointer().hover(s => s.bg(t.hover))
         .on_click((_, cx2) => {
           this.expandedRouteId = expanded ? null : r.id;
@@ -2021,20 +2082,18 @@ export default class Routing extends View {
     const filterLabel = this.selectedAgent || (this.selectedAcct ? (this.acctOf(this.selectedAcct)?.name || this.selectedAcct) : null);
     const list = v_flex().id("requests-list").flex_1().min_h(0)
       .overflow_y_scrollbar().px(10).pb(4).gap(0);
-    if (inFlight.length) {
-      list.child(div().pt(6).pb(2).text_size(9.5).font_semibold().text_color(t.dim).child(`IN FLIGHT ${inFlight.length}`));
-      for (const r of inFlight) list.child(rowFor(r));
+    // No sub-headers: a section label that comes and goes with every request
+    // made the list jump. The header row carries both counts instead.
+    for (const r of inFlight) list.child(rowFor(r));
+    for (const r of recent) list.child(rowFor(r));
+    if (!inFlight.length && !recent.length) {
+      list.child(div().px(2).py(12).text_size(11).text_color(t.dim).child(filterLabel ? "No matching requests." : "No request yet."));
     }
-    list.child(div().pt(6).pb(2).text_size(9.5).font_semibold().text_color(t.dim).child(`RECENT ${recent.length}`));
-    if (recent.length) for (const r of recent) list.child(rowFor(r));
-    else list.child(div().p(12).text_size(11).text_color(t.dim).child(filterLabel ? "No matching requests." : "No request yet."));
 
     const updatePill = this.updatePill(t);
     return v_flex().size_full().bg(t.surface).text_color(t.foreground)
       .child(h_flex().px(12).pt(10).pb(6).gap(6).items_center()
         .child(div().text_size(13).font_semibold().child("Magpie"))
-        .when(inFlight.length > 0, el => el
-          .child(div().text_size(11).text_color(t.accent).flex_none().child(`· ${inFlight.length} live`)))
         .when(Boolean(updatePill), el => el
           .child(div().text_size(11).text_color(t.dim).flex_none().child("·"))
           .child(updatePill))
@@ -2051,21 +2110,26 @@ export default class Routing extends View {
             })
             .children(children)))
         .child(this.quotaPanel(t))
-        .child(h_flex().px(12).pb(4).gap(6).items_center()
-          .child(div().text_size(9.5).font_semibold().text_color(t.dim).child("REQUESTS"))
+        .child(h_flex().px(12).pt(2).pb(2).gap(6).items_center()
+          .child(div().text_size(11).font_semibold().flex_none().child("Requests"))
           .when(Boolean(filterLabel), el => el.child(h_flex().id("clear-filter").px(6).py(1).gap(4).rounded(4)
             .bg(t.canvas).border(1).border_color(t.border).items_center().cursor_pointer()
             .hover(s => s.bg(t.hover))
             .on_click((_, cx2) => { this.selectedAgent = null; this.selectedAcct = null; cx2.notify(); })
             .child(div().text_size(9.5).text_color(t.accent).max_w(100).truncate().child(filterLabel))
             .child(div().text_size(9.5).text_color(t.dim).child("×"))))
+          .when(inFlight.length > 0, el => el
+            .child(div().text_size(9.5).text_color("#d4b06a").flex_none().child(`${inFlight.length} active`))
+            .when(recent.length > 0, el2 => el2.child(div().text_size(9.5).text_color(t.dim).flex_none().child("·"))))
+          .when(recent.length > 0, el => el
+            .child(div().text_size(9.5).text_color(t.dim).flex_none().child(`${recent.length} recent`)))
           .child(div().flex_1())
           .child(h_flex().id("toggle-masked").gap(4).items_center().flex_none()
             .cursor_pointer()
             .on_click((_, cx2) => { this.masked = !this.masked; cx2.notify(); })
-            .child(svg(`mods/routing/icons/${this.masked ? "eye-off" : "eye"}.svg`).size(12)
+            .child(svg(`mods/routing/icons/${this.masked ? "eye-off" : "eye"}.svg`).size(11)
               .text_color(this.masked ? t.muted : t.accent))
-            .child(div().text_size(10).font_semibold()
+            .child(div().text_size(9.5)
               .text_color(this.masked ? t.muted : t.accent)
               .child(this.masked ? "Masked" : "Shown"))))
         .child(list)

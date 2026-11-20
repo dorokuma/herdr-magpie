@@ -6,7 +6,7 @@
 
 **面向 [Herdr](https://herdr.dev) 的 Magpie 实时路由拓扑、供应商配额监控与请求追踪面板。**
 
-[![Release](https://img.shields.io/badge/release-v0.3.1-34d399?style=flat-square&labelColor=18181b)](https://github.com/dorokuma/herdr-magpie/releases)
+[![Release](https://img.shields.io/badge/release-v0.3.2-34d399?style=flat-square&labelColor=18181b)](https://github.com/dorokuma/herdr-magpie/releases)
 [![Herdr Layout & Mod](https://img.shields.io/badge/herdr-layout%20%26%20mod-5e95d7?style=flat-square&labelColor=18181b)](https://herdr.dev)
 [![GPUI Native](https://img.shields.io/badge/GPUI-native-d4b06a?style=flat-square&labelColor=18181b)](https://gpui-kit.com)
 [![License: MIT](https://img.shields.io/badge/license-MIT-a1a1aa?style=flat-square&labelColor=18181b)](LICENSE)
@@ -24,9 +24,9 @@
 ## 核心特性
 
 - **平滑 S 型贝塞尔拓扑连线** — 基于 GPUI 原生 `PathBuilder.cubic_bezier_to` 绘制三次贝塞尔实线，具备 `4px` 端口微距留白与锚点、原生 `.loop()` 呼吸发光、与真实请求同步的去程/返程脉冲光点，以及报错重试时的红闪抖动提示。
-- **胶囊联动高亮与过滤** — 悬停任意 Agent 或右侧账号胶囊即可高亮其活跃与近期路由连线；点击胶囊可锁定高亮并联动过滤下方 `REQUESTS` 列表。
-- **动态供应商配额监控** — 自动读取用户本机或远端 `~/.config/magpie/providers.json` 与路由元数据，内置 85+ 常见 Agent 与模型供应商彩色/单色图标。统一采用 **剩余百分比（Remaining %）** 与首字母大写（Title Case）规范，额度耗尽时醒目显示红色 `Exhausted`；自动隐藏无意义的静态说明文本，并在零冷却时常驻显示 `● Plenty Of Juice — Build On.`。
-- **可展开的请求追踪明细** — 区分 `IN FLIGHT` 与 `RECENT` 实时流，支持一键切换 `Masked` / `Shown` 隐私脱敏；点击任意请求行即可就地展开查看请求/实际模型切换、TTFT 首字延迟、输入/输出 Token 与历次 `tries` 状态码。
+- **胶囊联动高亮与过滤** — 悬停任意 Agent 或右侧账号胶囊即可高亮其活跃与近期路由连线；点击胶囊可锁定高亮并联动过滤下方 `Requests` 列表。
+- **动态供应商配额监控** — 自动读取用户本机或远端 `~/.config/magpie/providers.json` 与路由元数据，内置 85+ 常见 Agent 与模型供应商彩色/单色图标。统一采用 **剩余百分比（Remaining %）** 与首字母大写（Title Case）规范，额度耗尽时醒目显示红色 `Exhausted`；供应商折叠时按「短窗口 · 长窗口」显示两个百分比（如 `71% · 96%`），长窗口用完即显示 `Exhausted`；自动隐藏无意义的静态说明文本，并在零冷却时常驻显示 `● Plenty Of Juice — Build On.`。
+- **可展开的请求追踪明细** — 统一的 `Requests` 列表，标题行直接给出计数（如 `2 active · 40 recent`），进行中的请求排在最前，支持一键切换 `Masked` / `Shown` 隐私脱敏；点击任意请求行即可就地展开查看请求/实际模型切换、TTFT 首字延迟、输入/输出 Token 与历次 `tries` 状态码。
 - **原生设置页布局卡片** — 在 Herdr **Settings → Look → Layout** 中提供名为 **Magpie** 的专属布局与高清微缩预览图。
 - **可复现的离线演示模式** — 内置完全虚构的演示数据，无需网关、凭据或真实供应商信息即可渲染完整面板，适合制作截图、评审和在安装前体验。
 
@@ -42,15 +42,15 @@ chmod +x install.sh
 也可以不克隆仓库，直接用发布包里的同一个安装脚本：
 
 ```bash
-curl -fsSL https://github.com/dorokuma/herdr-magpie/releases/download/v0.3.1/herdr-magpie-0.3.1.tar.gz | tar xz -C /tmp
-/tmp/herdr-magpie-0.3.1/install.sh
+curl -fsSL https://github.com/dorokuma/herdr-magpie/releases/download/v0.3.2/herdr-magpie-0.3.2.tar.gz | tar xz -C /tmp
+/tmp/herdr-magpie-0.3.2/install.sh
 ```
 
 安装完成后，在 Herdr 中按 `Ctrl+Shift+L`（或在 **Settings → Look → Layout** 中选择 **Magpie**），再点击右上角标签栏的 **Routing** 按钮即可展开面板。
 
 ## 更新
 
-从 `0.3.0` 起面板可以自己更新。有请求在进行时，面板顶栏会显示 `· n live`；有新版本发布时，它后面会出现
+从 `0.3.0` 起面板可以自己更新。有新版本发布时，面板顶栏 `Magpie` 标题后面会出现
 **`↑ Update x.y.z`** 按钮；点一下，它会从 GitHub 下载发布包、校验 `sha256`、把文件铺到
 安装目录，Herdr 随即自动重载面板。你的 `mods/routing/config.json`（网关、远端、演示模式）
 以及折叠状态、排序都会保留。已经是最新版本时，这个按钮不会出现。
