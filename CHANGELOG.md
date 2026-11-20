@@ -13,6 +13,10 @@ together at one version.
 
 - The READMEs no longer name a version. The release badge reads the latest GitHub Release, and the no-clone install lines resolve `releases/latest` themselves, so neither needs editing at each release. Documentation only: nothing that gets installed changed, so no version was cut for it.
 
+### Tests
+
+- The test suite and the release gate now live in the repository: `node --test tests/*.test.mjs` and `scripts/release-check.sh`. The tests run the shipped `mods/routing/main.js` outside Herdr, including the update pill's install script and the updater of every released version. Nothing that gets installed changed.
+
 ## [0.3.2] - 2026-11-20
 
 ### Changed

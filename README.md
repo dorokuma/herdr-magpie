@@ -47,6 +47,8 @@ herdr-magpie/
 │   │   └── icons/                  # 85+ bundled agent & provider icons (SVG + 64x64 PNG)
 │   └── tabs-routing/
 │       └── main.js                 # Tab bar with per-space Routing / Files / Changes toggles
+├── tests/                          # node --test tests/*.test.mjs (see tests/README.md)
+├── scripts/release-check.sh        # Release gate
 ├── RECIPE.md                       # Herdr layout & mod build specification
 └── install.sh                      # One-step installer & verifier
 ```

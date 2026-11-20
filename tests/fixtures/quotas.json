@@ -1,0 +1,386 @@
+{
+ "object": "list",
+ "data": [
+  {
+   "provider": "cursor",
+   "name": "Cursor",
+   "kind": "subscription",
+   "plan": "Free",
+   "user": "ada@example.com",
+   "windows": [
+    {
+     "name": "Cursor Models",
+     "used": 0,
+     "remaining": 100,
+     "resetsAt": "2030-02-12T15:45:07Z",
+     "holdsWhy": "low"
+    },
+    {
+     "name": "Other Models",
+     "used": 0,
+     "remaining": 100,
+     "resetsAt": "2030-02-12T15:45:07Z",
+     "holdsWhy": "low"
+    },
+    {
+     "name": "Grok Bot",
+     "used": 51.7,
+     "remaining": 48.3,
+     "resetsAt": "2030-01-23T06:39:27Z"
+    },
+    {
+     "name": "Total",
+     "used": 0,
+     "remaining": 100,
+     "resetsAt": "2030-02-12T15:45:07Z"
+    }
+   ]
+  },
+  {
+   "provider": "workbuddy",
+   "name": "WorkBuddy",
+   "kind": "subscription",
+   "plan": "Free plan",
+   "user": "555****0100",
+   "windows": [
+    {
+     "name": "Credits",
+     "used": 100,
+     "remaining": 0,
+     "resetsAt": "2030-01-30T15:59:59Z",
+     "display": "500 / 500",
+     "amount": 500,
+     "limit": 500,
+     "unit": "credits"
+    },
+    {
+     "name": "Extra credits",
+     "used": 91.4,
+     "remaining": 8.6,
+     "display": "2193.6 / 2400",
+     "amount": 2193.6,
+     "limit": 2400,
+     "unit": "credits",
+     "runsOutAt": "2030-02-16T16:00:40Z",
+     "runsOut": 7.5
+    },
+    {
+     "name": "Total credits",
+     "used": 92.8,
+     "remaining": 7.2,
+     "resetsAt": "2030-01-30T15:59:59Z",
+     "display": "2693.6 / 2900",
+     "amount": 2693.6,
+     "limit": 2900,
+     "unit": "credits",
+     "holdsWhy": "credits"
+    }
+   ]
+  },
+  {
+   "provider": "workbuddy-ai",
+   "name": "WorkBuddy AI",
+   "kind": "subscription",
+   "plan": "Free plan",
+   "user": "ada",
+   "alias": "Spare 1",
+   "windows": [
+    {
+     "name": "Credits",
+     "used": 100,
+     "remaining": 0,
+     "resetsAt": "2030-01-30T15:59:59Z",
+     "display": "100 / 100",
+     "amount": 100,
+     "limit": 100,
+     "unit": "credits"
+    },
+    {
+     "name": "Extra credits",
+     "used": 50,
+     "remaining": 50,
+     "display": "30 / 60",
+     "amount": 30,
+     "limit": 60,
+     "unit": "credits"
+    },
+    {
+     "name": "Total credits",
+     "used": 81.25,
+     "remaining": 18.75,
+     "resetsAt": "2030-01-30T15:59:59Z",
+     "display": "130 / 160",
+     "amount": 130,
+     "limit": 160,
+     "unit": "credits",
+     "holdsWhy": "none"
+    }
+   ]
+  },
+  {
+   "provider": "workbuddy-ai",
+   "name": "WorkBuddy AI",
+   "kind": "subscription",
+   "plan": "Free plan",
+   "user": "grace",
+   "alias": "Spare 2",
+   "windows": [
+    {
+     "name": "Credits",
+     "used": 100,
+     "remaining": 0,
+     "resetsAt": "2030-01-30T15:59:59Z",
+     "display": "100 / 100",
+     "amount": 100,
+     "limit": 100,
+     "unit": "credits"
+    },
+    {
+     "name": "Extra credits",
+     "used": 0,
+     "remaining": 100,
+     "display": "0 / 30",
+     "amount": 0,
+     "limit": 30,
+     "unit": "credits"
+    },
+    {
+     "name": "Total credits",
+     "used": 76.92,
+     "remaining": 23.08,
+     "resetsAt": "2030-01-30T15:59:59Z",
+     "display": "100 / 130",
+     "amount": 100,
+     "limit": 130,
+     "unit": "credits",
+     "holdsWhy": "none"
+    }
+   ]
+  },
+  {
+   "provider": "workbuddy-ai",
+   "name": "WorkBuddy AI",
+   "kind": "subscription",
+   "plan": "Free plan",
+   "user": "linus@example.com",
+   "alias": "Spare 3",
+   "windows": [
+    {
+     "name": "Credits",
+     "used": 100,
+     "remaining": 0,
+     "resetsAt": "2030-01-30T15:59:59Z",
+     "display": "100 / 100",
+     "amount": 100,
+     "limit": 100,
+     "unit": "credits"
+    }
+   ]
+  },
+  {
+   "provider": "devin",
+   "name": "Devin",
+   "kind": "subscription",
+   "user": "ada@example.com · My Team",
+   "until": "2030-01-28T09:21:55Z",
+   "windows": [
+    {
+     "name": "1 day",
+     "used": 0,
+     "remaining": 100,
+     "resetsAt": "2030-01-20T08:00:00Z"
+    },
+    {
+     "name": "7 days",
+     "used": 100,
+     "remaining": 0,
+     "resetsAt": "2030-01-22T08:00:00Z"
+    }
+   ]
+  },
+  {
+   "provider": "agy-cli",
+   "name": "agy-cli",
+   "kind": "subscription",
+   "user": "ada@example.com",
+   "alias": "Ultra",
+   "windows": [
+    {
+     "name": "Gemini · 7 days",
+     "used": 24.7,
+     "remaining": 75.3,
+     "resetsAt": "2030-01-25T10:37:32Z",
+     "pool": "Gemini",
+     "holdsWhy": "none"
+    },
+    {
+     "name": "Gemini · 5 hours",
+     "used": 5.8,
+     "remaining": 94.2,
+     "resetsAt": "2030-01-19T15:53:19Z",
+     "pool": "Gemini",
+     "holdsWhy": "none"
+    },
+    {
+     "name": "Claude & GPT · 7 days",
+     "used": 89.6,
+     "remaining": 10.4,
+     "resetsAt": "2030-01-25T10:28:51Z",
+     "pool": "Claude & GPT",
+     "holdsWhy": "none"
+    },
+    {
+     "name": "Claude & GPT · 5 hours",
+     "used": 0,
+     "remaining": 100,
+     "resetsAt": "2030-01-19T18:41:33Z",
+     "pool": "Claude & GPT",
+     "holdsWhy": "low"
+    }
+   ]
+  },
+  {
+   "provider": "agy-cli",
+   "name": "agy-cli",
+   "kind": "subscription",
+   "user": "grace@example.com",
+   "alias": "Pro",
+   "windows": [
+    {
+     "name": "Gemini · 7 days",
+     "used": 35.3,
+     "remaining": 64.7,
+     "resetsAt": "2030-01-24T02:11:00Z",
+     "pool": "Gemini",
+     "holdsWhy": "none"
+    },
+    {
+     "name": "Gemini · 5 hours",
+     "used": 15.2,
+     "remaining": 84.8,
+     "resetsAt": "2030-01-19T16:20:00Z",
+     "pool": "Gemini",
+     "holdsWhy": "none"
+    },
+    {
+     "name": "Claude & GPT · 7 days",
+     "used": 0,
+     "remaining": 100,
+     "resetsAt": "2030-01-26T09:00:00Z",
+     "pool": "Claude & GPT",
+     "holdsWhy": "low"
+    },
+    {
+     "name": "Claude & GPT · 5 hours",
+     "used": 0,
+     "remaining": 100,
+     "resetsAt": "2030-01-19T18:41:33Z",
+     "pool": "Claude & GPT",
+     "holdsWhy": "low"
+    },
+    {
+     "name": "Gemini 4 Argon · 7 days",
+     "used": 75.7,
+     "remaining": 24.3,
+     "resetsAt": "2030-01-23T12:00:00Z",
+     "pool": "Gemini 4 Argon",
+     "holdsWhy": "none"
+    }
+   ]
+  },
+  {
+   "provider": "ai-studio",
+   "name": "Google AI Studio",
+   "kind": "subscription",
+   "user": "ada@example.com",
+   "windows": [
+    {
+     "name": "gemini-4-carbon",
+     "used": 100,
+     "remaining": 0,
+     "resetsAt": "2030-01-20T08:00:00Z"
+    },
+    {
+     "name": "proxy exit",
+     "used": 0,
+     "remaining": 100
+    },
+    {
+     "name": "admin page",
+     "used": 0,
+     "remaining": 100
+    },
+    {
+     "name": "backend admin",
+     "used": 0,
+     "remaining": 100
+    }
+   ]
+  },
+  {
+   "provider": "gemini-web",
+   "name": "Gemini Web",
+   "kind": "subscription",
+   "user": "ada@example.com",
+   "windows": [
+    {
+     "name": "5 hours",
+     "used": 29,
+     "remaining": 71,
+     "resetsAt": "2030-01-19T15:00:00Z"
+    },
+    {
+     "name": "7 days",
+     "used": 4,
+     "remaining": 96,
+     "resetsAt": "2030-01-24T13:00:00Z"
+    }
+   ]
+  },
+  {
+   "provider": "stepfun",
+   "name": "StepFun (China)",
+   "kind": "plan",
+   "plan": "Plus",
+   "until": "2030-02-04T12:48:28+08:00",
+   "renew": "off",
+   "windows": [
+    {
+     "name": "Credits",
+     "used": 2.6,
+     "remaining": 97.4,
+     "resetsAt": "2030-02-04T04:48:28Z"
+    }
+   ]
+  },
+  {
+   "provider": "agentrouter-github",
+   "name": "AgentRouter-GitHub",
+   "kind": "balance",
+   "windows": [],
+   "error": "the reply is not JSON"
+  },
+  {
+   "provider": "arkapi",
+   "name": "ArkAPI",
+   "kind": "balance",
+   "windows": [],
+   "balance": "$12.50"
+  },
+  {
+   "provider": "stepfun",
+   "name": "StepFun (China)",
+   "kind": "balance",
+   "windows": [],
+   "balance": "¥3.20"
+  },
+  {
+   "provider": "happycoding",
+   "name": "HappyCoding",
+   "kind": "balance",
+   "windows": [],
+   "balance": "$4.76",
+   "last": true
+  }
+ ]
+}
