@@ -28,37 +28,37 @@
     {
       "key": "openai",
       "name": "OpenAI",
-      "who": "org@acme.dev",
+      "who": "org@example.invalid",
       "model": "gpt-5.4"
     },
     {
       "key": "deepseek",
       "name": "DeepSeek",
-      "who": "api@acme.dev",
+      "who": "api@example.invalid",
       "model": "deepseek-r1"
     },
     {
       "key": "anthropic",
       "name": "Anthropic",
-      "who": "team@acme.dev",
+      "who": "team@example.invalid",
       "model": "claude-sonnet-4"
     },
     {
       "key": "openrouter",
       "name": "OpenRouter",
-      "who": "pro@acme.dev",
+      "who": "pro@example.invalid",
       "model": "qwen-3-coder"
     },
     {
       "key": "ai-studio",
       "name": "Google AI Studio",
-      "who": "dev@acme.dev",
+      "who": "dev@example.invalid",
       "model": "gemini-2.5-pro"
     },
     {
       "key": "cursor",
       "name": "Cursor",
-      "who": "pro@acme.dev",
+      "who": "pro@example.invalid",
       "model": "claude-4-opus"
     }
   ],
@@ -115,11 +115,22 @@
       "ago": 14,
       "done": true,
       "status": 200,
-      "tokens": 24800,
-      "in": 21400,
+      "tokens": 23300,
+      "in": 600,
       "out": 3400,
       "ttft": 340,
       "ms": 3800,
+      "usage": [
+        {
+          "in": 200,
+          "cache_read": 100
+        },
+        {
+          "in": 400,
+          "cache_read": 19000,
+          "cache_write": 200
+        }
+      ],
       "tries": [
         {
           "id": "deepseek",
@@ -149,11 +160,18 @@
       "ago": 42,
       "done": true,
       "status": 200,
-      "tokens": 48200,
-      "in": 42000,
+      "tokens": 49200,
+      "in": 300,
       "out": 6200,
       "ttft": 410,
       "ms": 5400,
+      "usage": [
+        {
+          "in": 300,
+          "cache_read": 42500,
+          "cache_write": 200
+        }
+      ],
       "tries": [
         {
           "id": "anthropic",
@@ -176,11 +194,18 @@
       "ago": 95,
       "done": true,
       "status": 200,
-      "tokens": 31500,
-      "in": 28000,
+      "tokens": 33500,
+      "in": 2600,
       "out": 3500,
       "ttft": 520,
       "ms": 4100,
+      "usage": [
+        {
+          "in": 2600,
+          "cache_read": 26200,
+          "cache_write": 1200
+        }
+      ],
       "tries": [
         {
           "id": "deepseek",
@@ -203,11 +228,18 @@
       "ago": 160,
       "done": true,
       "status": 200,
-      "tokens": 19400,
-      "in": 17000,
+      "tokens": 20800,
+      "in": 3400,
       "out": 2400,
       "ttft": 290,
       "ms": 2200,
+      "usage": [
+        {
+          "in": 3400,
+          "cache_read": 14800,
+          "cache_write": 200
+        }
+      ],
       "tries": [
         {
           "id": "openrouter",
@@ -247,35 +279,63 @@
   ],
   "quotas": {
     "claude": {
-      "left": 82,
+      "provider": "claude",
       "name": "Claude",
-      "plan": "Max Plan",
-      "kind": "subscription",
-      "windows": [
+      "accounts": [
         {
-          "name": "5 hours",
-          "remaining": 76,
-          "used": 24,
-          "resetsIn": 10800
+          "name": "Claude",
+          "plan": "Max Plan",
+          "kind": "subscription",
+          "alias": "Max",
+          "user": "dev@example.invalid",
+          "windows": [
+            {
+              "name": "5 hours",
+              "remaining": 76,
+              "used": 24,
+              "resetsIn": 10800
+            },
+            {
+              "name": "7 days",
+              "remaining": 88,
+              "used": 12,
+              "resetsIn": 432000
+            }
+          ]
         },
         {
-          "name": "7 days",
-          "remaining": 88,
-          "used": 12,
-          "resetsIn": 432000
+          "name": "Claude",
+          "plan": "Max Plan",
+          "kind": "subscription",
+          "alias": "Team",
+          "user": "team@example.invalid",
+          "windows": [
+            {
+              "name": "5 hours",
+              "remaining": 54,
+              "used": 46,
+              "resetsIn": 7200
+            },
+            {
+              "name": "7 days",
+              "remaining": 71,
+              "used": 29,
+              "resetsIn": 345600
+            }
+          ]
         }
       ]
     },
     "codex": {
-      "left": 64,
+      "left": 18,
       "name": "OpenAI Codex",
       "plan": "Pro Plan",
       "kind": "subscription",
       "windows": [
         {
           "name": "5 hours",
-          "remaining": 64,
-          "used": 36,
+          "remaining": 18,
+          "used": 82,
           "resetsIn": 14400
         }
       ]

@@ -93,6 +93,36 @@ test("the update pill: only when a newer release exists, right after the title",
   assert.equal(find(o.render(cx), "mod-update"), null, "demo mode: no pill");
 });
 
+test("the demo still shows cache hits, tok/s and a multi-account two-window quota", async () => {
+  const { o, cx, draw } = await demo();
+  const line = draw().join(" | ");
+  assert.match(line, /983 tok\/s · 96% cached/, "a done request carries its rate and cache hit");
+  assert.match(line, /cache hit 96%/, "the expanded request card repeats it");
+
+  // main.js cacheHit reads usage[] per try: usage.in excludes both cache
+  // tiers, prompt = in + cache_read + cache_write, and the row's in/tokens
+  // must stay on that same book — in === sum(usage.in), tokens === prompt + out
+  for (const r of [...o.routes.values()].filter((r) => r.done)) {
+    let prompt = 0, input = 0;
+    for (const u of r.usage || []) {
+      input += u.in || 0;
+      prompt += (u.in || 0) + (u.cache_read || 0) + (u.cache_write || 0);
+    }
+    assert.equal(r.in, input, `route ${r.id}: in === sum(usage.in)`);
+    assert.equal(r.tokens, prompt + r.out, `route ${r.id}: tokens === prompt + out`);
+  }
+
+  o.quotaOpen = true;
+  const open = texts(o.render(cx));
+  assert.ok(open.includes("2 Accounts"), "a provider with two seats folds as `2 Accounts`");
+  const claude = texts(find(o.render(cx), "quota-prov-hdr-claude")).join(" ");
+  assert.match(claude, /76% · 88%/, "its folded row reads short window · long window");
+
+  o.quotaOpen = false;
+  const strip = texts(o.render(cx)).join(" ");
+  assert.match(strip, /×2/, "the summary chip carries the account count");
+});
+
 test("before the gateway answers, the panel says so instead of drawing a stage", async () => {
   const m = await loadMod();
   const o = m.make();
