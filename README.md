@@ -1,15 +1,21 @@
 <div align="center">
 
-<img src="mods/routing/route.svg" width="52" height="52" alt="herdr-magpie logo" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/logo-light.svg">
+  <img src="assets/logo-light.svg" width="64" height="64" alt="herdr-magpie logo" />
+</picture>
 
 # herdr-magpie
 
-**Live LLM routing topology, provider quota monitor, and request inspector for [Herdr](https://herdr.dev).**
+**Watch your LLM requests fly: live routing topology, quota monitor & request inspector for [Herdr](https://herdr.dev).**
 
 [![Release](https://img.shields.io/github/v/release/dorokuma/herdr-magpie?style=flat-square&labelColor=18181b&color=34d399)](https://github.com/dorokuma/herdr-magpie/releases)
 [![Herdr Layout & Mod](https://img.shields.io/badge/herdr-layout%20%26%20mod-5e95d7?style=flat-square&labelColor=18181b)](https://herdr.dev)
 [![GPUI Native](https://img.shields.io/badge/GPUI-native-d4b06a?style=flat-square&labelColor=18181b)](https://gpui-kit.com)
 [![License: MIT](https://img.shields.io/badge/license-MIT-a1a1aa?style=flat-square&labelColor=18181b)](LICENSE)
+
+[Quick Start](#quick-start) · [Highlights](#highlights) · [Offline Demo](#offline-demo) · [State Machine](#how-the-flight-state-machine-works)
 
 English · [简体中文](README.zh-CN.md)
 
@@ -23,59 +29,57 @@ English · [简体中文](README.zh-CN.md)
 
 ## Highlights
 
-- **Smooth S-Curve Topology** — Native GPUI cubic Bézier wires (`PathBuilder.cubic_bezier_to`) with `4px` port breathing gaps, anchor dots, native `.loop()` glow animations, real-time outbound/return pulses, and red error-shake flashes.
-- **Interactive Node Filtering** — Hover any agent or provider pill to spotlight its active and recent connections; click a pill to lock focus and filter the `Requests` feed below.
-- **Dynamic Provider Quotas** — Automatically discovers your installed Magpie providers and brand icons (85+ bundled vector/raster logos). Displays unified **remaining-%** bars in Title Case (`Extra Credits`, `Free Plan`, `5 Hours`), flags depleted windows as `Exhausted`, reads a folded provider as short window then long window (`71% · 96%`) and as `Exhausted` once the long one is empty, hides noisy static config text rows, and shows `● Plenty Of Juice — Build On.` when a plugin provider has zero active cooldowns.
-- **Inline Request Inspector** — One `Requests` feed whose header carries the counts (`2 active · 40 recent`), active requests first, with one-click `Masked` / `Shown` account privacy toggle. Click any request row to expand an inline trace card showing model swaps, TTFT latency, input/output tokens, and per-try HTTP statuses.
-- **First-Class Herdr Layout Card** — Ships as the **Magpie** layout (`layouts/Magpie.json`) with a custom vector/raster preview card (`layouts/Magpie.svg` & `layouts/Magpie.png`) in **Settings → Look**.
-- **Reproducible Demo Mode** — Built-in, fully synthetic fixture renders the complete stage without a gateway, credentials, or live provider data. Ideal for screenshots, reviews, and trying the mod before setup.
-
-## What's Included
-
-```text
-herdr-magpie/
-├── layouts/
-│   ├── Magpie.json                 # Herdr workspace layout integrating the Routing side panel
-│   ├── Magpie.svg                  # Vector layout preview thumbnail
-│   └── Magpie.png                  # Raster layout preview thumbnail for Settings -> Look
-├── mods/
-│   ├── routing/
-│   │   ├── main.js                 # Live topology stage, quota monitor, and request inspector
-│   │   ├── route.svg               # Routing node-split icon
-│   │   ├── config.example.json     # Optional local/remote Magpie gateway configuration
-│   │   ├── demo.json               # Synthetic fixture for offline previews and screenshots
-│   │   └── icons/                  # 85+ bundled agent & provider icons (SVG + 64x64 PNG)
-│   └── tabs-routing/
-│       └── main.js                 # Tab bar with per-space Routing / Files / Changes toggles
-├── tests/                          # node --test tests/*.test.mjs (see tests/README.md)
-├── scripts/release-check.sh        # Release gate
-├── RECIPE.md                       # Herdr layout & mod build specification
-└── install.sh                      # One-step installer & verifier
-```
+| | |
+| --- | --- |
+| **Smooth S-Curve Topology**<br>GPUI-native cubic Bézier wires, `40 ms` animation ticks, red error-shake flashes, and fixed seats that never jitter. | **Multi-Account Quotas**<br>87 bundled brand icons, green/gold/red remaining-% bars, folded `71% · 96%` short·long readings, every account listed and drag-to-reorder kept. |
+| **Cache Hit & Smart `tok/s`**<br>One `Requests` header counts `active · recent`, `· 99% cached` prompt-cache rate, post-completion `tok/s` excluding TTFT (falling back to end-to-end on short tails), per-try HTTP status cards. | **Interactive Focus & Privacy**<br>Hover to spotlight connections, click to lock and filter the request feed, one-click `Masked` / `Shown` account privacy. |
+| **Space-Aware Herdr Layout**<br>First-class `Magpie` layout card in Settings → Look; `tabs-routing` remembers the sidebar per Space and fits the desktop titlebar. | **Zero-Dep & Self-Updating**<br>Pure ESM, no `node_modules`; in-panel one-click update with `sha256` verify; zero-network offline Demo mode. |
 
 ## Quick Start
 
+You need [Herdr](https://herdr.dev) and a Magpie gateway on `127.0.0.1:3425` — or point the mod at a remote host through `herdr-core`, or just open the offline Demo below.
+
 ### 1. Install
-
-Clone the repository and run `./install.sh` (copies `layouts/` and `mods/` into `~/.config/herdr-app` and validates both mods with `herdr-app check`):
-
-```bash
-git clone https://github.com/dorokuma/herdr-magpie.git
-cd herdr-magpie
-chmod +x install.sh
-./install.sh
-```
-
-No clone needed either: a release archive carries the same installer. These two lines always fetch the latest release.
 
 ```bash
 V=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/dorokuma/herdr-magpie/releases/latest | sed 's|.*/v||')
 curl -fsSL "https://github.com/dorokuma/herdr-magpie/releases/download/v$V/herdr-magpie-$V.tar.gz" | tar xz -C /tmp && "/tmp/herdr-magpie-$V/install.sh"
 ```
 
-### Updating
+Prefer a clone instead? See [What's Included & Local Development](#whats-included--local-development).
 
-From `0.3.0` on the panel updates itself. When a newer release is published, an
+### 2. Switch to the `Magpie` Layout
+
+Press `Ctrl+Shift+L` inside Herdr (or open **Settings → Look → Layout** and click **Magpie**), then click the **Routing** button in the top-right tab bar.
+
+<a name="offline-demo"></a>
+
+> [!TIP]
+> **Offline Demo Mode** — set `{"demo": true}` in `~/.config/herdr-app/mods/routing/config.json` to render the complete stage with zero network and zero credentials.
+
+## How the Flight State Machine Works
+
+```mermaid
+flowchart LR
+    W["wait"] -->|"assigned try"| O["out"]
+    O --> H["held / waitDone"]
+    H -->|"status ≥ 400 & next seat"| R["retry"]
+    R --> H
+    H -->|"done / terminal error"| B["back"]
+    B --> A["away"]
+```
+
+- **`wait` → `out`**: Magpie assigns the request to an upstream account (`r.tries[i]`); an outbound pulse glides along the S-curve to the target seat.
+- **`held` / `waitDone`**: the wire breathes with GPUI's `.loop("opacity")` while upstream generates (`tr.done`).
+- **`retry`**: a `status >= 400` attempt with a next seat shakes the failed pill, flashes `#e26a6a`, and dives back to the next seat, where it is `held` again.
+- **`back` → `away`**: `r.done` or a terminal error sends the return pulse home; once it lands, the wire fades out.
+
+## More Details
+
+<details>
+<summary><b>Updating &amp; Auto-Check Schedule</b></summary>
+
+The panel updates itself. When a newer release is published, an
 **`↑ Update x.y.z`** pill appears in the panel's top bar, right after the `Magpie` title.
 Click it: the release archive is downloaded from GitHub, its `sha256` is
 verified, the files are laid over the install and Herdr reloads the panel. Your
@@ -96,13 +100,12 @@ A look is one `HEAD` request to `github.com/dorokuma/herdr-magpie/releases/lates
 from your own machine. Nothing is sent, no token is used, and demo mode never
 looks.
 
-Installs older than `0.3.0` have no pill: run the two lines above once.
+Older installs without the update pill can run the two install lines above once.
 
-### 2. Switch to the `Magpie` Layout
+</details>
 
-Press `Ctrl+Shift+L` inside Herdr (or open **Settings → Look → Layout** and click **Magpie**), then click the **Routing** button in the top-right tab bar.
-
-### 3. Optional: Remote Magpie Host Configuration
+<details>
+<summary><b>Remote Magpie Host Configuration</b></summary>
 
 By default, `herdr-magpie` connects to `http://127.0.0.1:3425` on your local machine and reads `~/.config/magpie/providers.json` to discover your installed providers.
 
@@ -124,26 +127,49 @@ Edit `~/.config/herdr-app/mods/routing/config.json`:
 }
 ```
 
-### 4. Optional: Offline Demo Mode
+</details>
 
-Set `"demo": true` in `~/.config/herdr-app/mods/routing/config.json` to render the built-in synthetic fixture instead of polling a gateway:
+<a id="whats-included--local-development"></a>
 
-```json
-{
-  "demo": true
-}
+<details>
+<summary><b>What's Included &amp; Local Development</b></summary>
+
+```text
+herdr-magpie/
+├── assets/
+│   ├── logo-dark.svg               # Logo for GitHub dark mode
+│   └── logo-light.svg              # Logo for GitHub light mode
+├── layouts/
+│   ├── Magpie.json                 # Herdr workspace layout integrating the Routing side panel
+│   ├── Magpie.svg                  # Vector layout preview thumbnail
+│   └── Magpie.png                  # Raster layout preview thumbnail for Settings -> Look
+├── mods/
+│   ├── routing/
+│   │   ├── main.js                 # Live topology stage, quota monitor, and request inspector
+│   │   ├── route.svg               # Routing node-split icon
+│   │   ├── config.example.json     # Optional local/remote Magpie gateway configuration
+│   │   ├── demo.json               # Synthetic fixture for offline previews and screenshots
+│   │   └── icons/                  # 87 bundled agent & provider icons (SVG + 64x64 PNG)
+│   └── tabs-routing/
+│       └── main.js                 # Tab bar with per-space Routing / Files / Changes toggles
+├── tests/                          # node --test tests/*.test.mjs (see tests/README.md)
+├── scripts/release-check.sh        # Release gate
+├── RECIPE.md                       # Herdr layout & mod build specification
+└── install.sh                      # One-step installer & verifier
 ```
 
-The fixture lives at `~/.config/herdr-app/mods/routing/demo.json` and contains only invented agents, providers, requests, and quota values. Demo mode makes no network requests and does not read your real Magpie providers. Set `"demo": false` to return to live mode.
+Clone and run `./install.sh` (copies `layouts/` and `mods/` into `~/.config/herdr-app` and validates both mods with `herdr-app check`):
 
-## How the Flight State Machine Works
+```bash
+git clone https://github.com/dorokuma/herdr-magpie.git
+cd herdr-magpie
+chmod +x install.sh
+./install.sh
+```
 
-Each route from `/v1/magpie/trace` drives a lightweight state machine synchronized with real gateway events:
+Run the offline test suite with `node --test tests/*.test.mjs` (see `tests/README.md`), and read `RECIPE.md` for the Herdr layout & mod build specification.
 
-1. **`wait` → `out`**: Triggered as soon as Magpie assigns a request to an upstream account (`r.tries[i]`). An outbound pulse glides along the S-curve to the target seat.
-2. **`held` / `waitDone`**: The wire breathes gently using GPUI's native `.loop("opacity")` while waiting for upstream generation (`tr.done`).
-3. **`retry`**: If an upstream attempt fails (`status >= 400`) and Magpie reroutes to the next candidate, the failed pill shakes, flashes `#e26a6a`, and arcs to the next seat.
-4. **`back` → `away`**: Once `r.done` completes, the return pulse glides back to the originating agent and the wire fades out.
+</details>
 
 ## License
 

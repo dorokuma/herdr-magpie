@@ -11,6 +11,7 @@ together at one version.
 
 ### Docs
 
+- Both READMEs were redesigned: a centered hero with the new dual-theme logo (chosen by `prefers-color-scheme` via a `<picture>` tag), an anchor nav bar, a 3×2 highlights table, a Mermaid diagram of the routing state machine, and `<details>` folds for updating, remote-gateway, and dev notes. `assets/logo-dark.svg` and `assets/logo-light.svg` are new. Documentation only: nothing that gets installed changed, so no version was cut for it.
 - The READMEs no longer name a version. The release badge reads the latest GitHub Release, and the no-clone install lines resolve `releases/latest` themselves, so neither needs editing at each release. Documentation only: nothing that gets installed changed, so no version was cut for it.
 
 ### Tests

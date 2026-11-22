@@ -1,15 +1,21 @@
 <div align="center">
 
-<img src="mods/routing/route.svg" width="52" height="52" alt="herdr-magpie logo" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/logo-light.svg">
+  <img src="assets/logo-light.svg" width="64" height="64" alt="herdr-magpie logo" />
+</picture>
 
 # herdr-magpie
 
-**面向 [Herdr](https://herdr.dev) 的 Magpie 实时路由拓扑、供应商配额监控与请求追踪面板。**
+**看得见每一次 LLM 路由：[Herdr](https://herdr.dev) 的实时路由拓扑、配额监控与请求追踪面板。**
 
 [![Release](https://img.shields.io/github/v/release/dorokuma/herdr-magpie?style=flat-square&labelColor=18181b&color=34d399)](https://github.com/dorokuma/herdr-magpie/releases)
 [![Herdr Layout & Mod](https://img.shields.io/badge/herdr-layout%20%26%20mod-5e95d7?style=flat-square&labelColor=18181b)](https://herdr.dev)
 [![GPUI Native](https://img.shields.io/badge/GPUI-native-d4b06a?style=flat-square&labelColor=18181b)](https://gpui-kit.com)
 [![License: MIT](https://img.shields.io/badge/license-MIT-a1a1aa?style=flat-square&labelColor=18181b)](LICENSE)
+
+[快速开始](#快速开始) · [核心特性](#核心特性) · [离线演示](#离线演示) · [状态机](#路由脉冲状态机)
 
 [English](README.md) · 简体中文
 
@@ -23,34 +29,57 @@
 
 ## 核心特性
 
-- **平滑 S 型贝塞尔拓扑连线** — 基于 GPUI 原生 `PathBuilder.cubic_bezier_to` 绘制三次贝塞尔实线，具备 `4px` 端口微距留白与锚点、原生 `.loop()` 呼吸发光、与真实请求同步的去程/返程脉冲光点，以及报错重试时的红闪抖动提示。
-- **胶囊联动高亮与过滤** — 悬停任意 Agent 或右侧账号胶囊即可高亮其活跃与近期路由连线；点击胶囊可锁定高亮并联动过滤下方 `Requests` 列表。
-- **动态供应商配额监控** — 自动读取用户本机或远端 `~/.config/magpie/providers.json` 与路由元数据，内置 85+ 常见 Agent 与模型供应商彩色/单色图标。统一采用 **剩余百分比（Remaining %）** 与首字母大写（Title Case）规范，额度耗尽时醒目显示红色 `Exhausted`；供应商折叠时按「短窗口 · 长窗口」显示两个百分比（如 `71% · 96%`），长窗口用完即显示 `Exhausted`；自动隐藏无意义的静态说明文本，并在零冷却时常驻显示 `● Plenty Of Juice — Build On.`。
-- **可展开的请求追踪明细** — 统一的 `Requests` 列表，标题行直接给出计数（如 `2 active · 40 recent`），进行中的请求排在最前，支持一键切换 `Masked` / `Shown` 隐私脱敏；点击任意请求行即可就地展开查看请求/实际模型切换、TTFT 首字延迟、输入/输出 Token 与历次 `tries` 状态码。
-- **原生设置页布局卡片** — 在 Herdr **Settings → Look → Layout** 中提供名为 **Magpie** 的专属布局与高清微缩预览图。
-- **可复现的离线演示模式** — 内置完全虚构的演示数据，无需网关、凭据或真实供应商信息即可渲染完整面板，适合制作截图、评审和在安装前体验。
+| | |
+| --- | --- |
+| **平滑 S 型拓扑**<br>GPUI 原生三次贝塞尔连线、40ms 动画帧间隔、报错红闪抖动，固定槽位连线绝不漂移。 | **多账号配额监控**<br>内置 87 个品牌图标、绿/金/红剩余百分比条，折叠时 `71% · 96%` 短·长窗口读数；多账号全量列举，拖拽重排自动持久化。 |
+| **缓存命中与智能 `tok/s`**<br>单行 `Requests` 计数头（`active · recent`）、`· 99% cached` 提示词缓存命中率、完成后按生成时长估算 `tok/s`（短尾自动回退端到端速率）、逐次尝试 HTTP 状态展开卡。 | **交互聚焦与隐私保护**<br>悬停聚光连线、点击锁定并过滤请求流、一键 `Masked` / `Shown` 账号脱敏。 |
+| **感知 Space 的 Herdr 布局**<br>一等公民 `Magpie` 布局卡（Settings → Look）；`tabs-routing` 按 Space 记忆侧栏状态并适配桌面端标题栏。 | **零依赖与自更新**<br>纯 ESM、零 `node_modules`；面板内 `sha256` 校验一键更新；零网络离线演示模式。 |
 
-## 快速安装
+## 快速开始
 
-```bash
-git clone https://github.com/dorokuma/herdr-magpie.git
-cd herdr-magpie
-chmod +x install.sh
-./install.sh
-```
+需要 [Herdr](https://herdr.dev) 与本机 `127.0.0.1:3425` 上的 Magpie 网关——也可以经 `herdr-core` 连接远端主机，或直接打开下方的离线演示。
 
-也可以不克隆仓库，直接用发布包里的同一个安装脚本。下面两行始终安装最新发布版：
+### 1. 安装
 
 ```bash
 V=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/dorokuma/herdr-magpie/releases/latest | sed 's|.*/v||')
 curl -fsSL "https://github.com/dorokuma/herdr-magpie/releases/download/v$V/herdr-magpie-$V.tar.gz" | tar xz -C /tmp && "/tmp/herdr-magpie-$V/install.sh"
 ```
 
-安装完成后，在 Herdr 中按 `Ctrl+Shift+L`（或在 **Settings → Look → Layout** 中选择 **Magpie**），再点击右上角标签栏的 **Routing** 按钮即可展开面板。
+想用 clone 方式安装？见[目录结构与本地开发](#目录结构与本地开发)。
 
-## 更新
+### 2. 切换到 `Magpie` 布局
 
-从 `0.3.0` 起面板可以自己更新。有新版本发布时，面板顶栏 `Magpie` 标题后面会出现
+在 Herdr 中按 `Ctrl+Shift+L`（或打开 **Settings → Look → Layout** 点击 **Magpie**），再点击右上角标签栏的 **Routing** 按钮。
+
+<a name="离线演示"></a>
+
+> [!TIP]
+> **离线演示模式** — 在 `~/.config/herdr-app/mods/routing/config.json` 中写入 `{"demo": true}`，即可零网络、零凭据预览完整舞台。
+
+## 路由脉冲状态机
+
+```mermaid
+flowchart LR
+    W["wait"] -->|"assigned try"| O["out"]
+    O --> H["held / waitDone"]
+    H -->|"status ≥ 400 且有下一槽位"| R["retry"]
+    R --> H
+    H -->|"done / 终止错误"| B["back"]
+    B --> A["away"]
+```
+
+- **`wait` → `out`**：Magpie 将请求分配给某个上游账号（`r.tries[i]`），去程脉冲沿 S 型曲线滑向目标槽位。
+- **`held` / `waitDone`**：等待上游生成（`tr.done`）期间，连线以 GPUI `.loop("opacity")` 缓缓呼吸。
+- **`retry`**：某次尝试 `status >= 400` 且存在下一槽位时，失败的胶囊抖动、红闪 `#e26a6a`，弧线折返至下一槽位并再次进入 `held`。
+- **`back` → `away`**：`r.done` 或终止错误触发返程脉冲滑回发起方，抵达后连线淡出。
+
+## 更多配置与详情
+
+<details>
+<summary><b>自动检查与面板内一键更新</b></summary>
+
+面板支持自更新。有新版本发布时，面板顶栏 `Magpie` 标题后面会出现
 **`↑ Update x.y.z`** 按钮；点一下，它会从 GitHub 下载发布包、校验 `sha256`、把文件铺到
 安装目录，Herdr 随即自动重载面板。你的 `mods/routing/config.json`（网关、远端、演示模式）
 以及折叠状态、排序都会保留。已经是最新版本时，这个按钮不会出现。
@@ -65,11 +94,16 @@ curl -fsSL "https://github.com/dorokuma/herdr-magpie/releases/download/v$V/herdr
 一次检查只是从本机向 `github.com/dorokuma/herdr-magpie/releases/latest` 发一个 `HEAD`
 请求，不上传任何数据、不需要 token；演示模式下从不检查。
 
-早于 `0.3.0` 的安装没有这个按钮，按上面两行命令手动更新一次即可。
+未带该按钮的旧版安装，按上面的两行安装命令手动更新一次即可。
 
-## 远端网关配置（可选）
+</details>
 
-默认连接本机 `http://127.0.0.1:3425`。如果你的 Magpie 运行在通过 `herdr-core` 连接的远端机器上，可复制示例配置：
+<details>
+<summary><b>远端 Magpie 网关配置</b></summary>
+
+默认连接本机 `http://127.0.0.1:3425`，并读取 `~/.config/magpie/providers.json` 来发现已安装的供应商。
+
+如果你的 Magpie 运行在通过 `herdr-core` 连接的远端机器上，可复制示例配置：
 
 ```bash
 cp ~/.config/herdr-app/mods/routing/config.example.json \
@@ -87,17 +121,49 @@ cp ~/.config/herdr-app/mods/routing/config.example.json \
 }
 ```
 
-## 离线演示模式（可选）
+</details>
 
-将 `~/.config/herdr-app/mods/routing/config.json` 中的 `"demo"` 设为 `true`，即可使用内置的虚构数据渲染完整面板，而不会轮询任何网关：
+<a id="目录结构与本地开发"></a>
 
-```json
-{
-  "demo": true
-}
+<details>
+<summary><b>目录结构与本地开发</b></summary>
+
+```text
+herdr-magpie/
+├── assets/
+│   ├── logo-dark.svg               # GitHub 深色模式 Logo
+│   └── logo-light.svg              # GitHub 浅色模式 Logo
+├── layouts/
+│   ├── Magpie.json                 # 集成 Routing 侧栏面板的 Herdr 工作区布局
+│   ├── Magpie.svg                  # 矢量布局预览缩略图
+│   └── Magpie.png                  # Settings -> Look 的位图预览缩略图
+├── mods/
+│   ├── routing/
+│   │   ├── main.js                 # 实时拓扑舞台、配额监控与请求追踪
+│   │   ├── route.svg               # 路由节点分叉图标
+│   │   ├── config.example.json     # 可选的本机/远端 Magpie 网关配置
+│   │   ├── demo.json               # 离线预览与截图用的虚构数据
+│   │   └── icons/                  # 87 个内置 Agent 与供应商图标（SVG + 64x64 PNG）
+│   └── tabs-routing/
+│       └── main.js                 # 按 Space 记忆 Routing / Files / Changes 切换的标签栏
+├── tests/                          # node --test tests/*.test.mjs（见 tests/README.md）
+├── scripts/release-check.sh        # 发布门禁
+├── RECIPE.md                       # Herdr 布局与 mod 构建规范
+└── install.sh                      # 一键安装与校验脚本
 ```
 
-演示数据位于 `~/.config/herdr-app/mods/routing/demo.json`，其中的 Agent、供应商、请求与配额均为虚构值。该模式不会发起网络请求，也不会读取你的真实 Magpie 供应商配置。恢复实时模式时将 `"demo"` 设回 `false` 即可。
+克隆仓库并运行 `./install.sh`（把 `layouts/` 与 `mods/` 拷入 `~/.config/herdr-app`，并用 `herdr-app check` 校验两个 mod）：
+
+```bash
+git clone https://github.com/dorokuma/herdr-magpie.git
+cd herdr-magpie
+chmod +x install.sh
+./install.sh
+```
+
+离线测试套件：`node --test tests/*.test.mjs`（见 `tests/README.md`）；Herdr 布局与 mod 构建规范见 `RECIPE.md`。
+
+</details>
 
 ## 开源协议
 
