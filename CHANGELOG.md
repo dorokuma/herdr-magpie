@@ -9,6 +9,12 @@ together at one version.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-24
+
+### Changed
+
+- **The demo fixture got richer.** `"demo": true` now shows what the panel can do: answered requests carry per-try `usage` with `cache_read` / `cache_write`, so the feed and the expanded request card show real cache-hit rates and tok/s; `Claude` reports two Max Plan accounts with `5 hours` and `7 days` windows each, folded as `2 Accounts`; and `OpenAI Codex` sits at 18% so the quota strip shows an amber warning. The invented account identities moved to `example.invalid`.
+
 ### Docs
 
 - Both READMEs were redesigned: a centered hero with the new dual-theme logo (chosen by `prefers-color-scheme` via a `<picture>` tag), an anchor nav bar, a 3×2 highlights table, a Mermaid diagram of the routing state machine, and `<details>` folds for updating, remote-gateway, and dev notes. `assets/logo-dark.svg` and `assets/logo-light.svg` are new. Documentation only: nothing that gets installed changed, so no version was cut for it.
@@ -16,7 +22,11 @@ together at one version.
 
 ### Tests
 
-- The test suite and the release gate now live in the repository: `node --test tests/*.test.mjs` and `scripts/release-check.sh`. The tests run the shipped `mods/routing/main.js` outside Herdr, including the update pill's install script and the updater of every released version. Nothing that gets installed changed.
+- The test suite and the release gate now live in the repository: `node --test tests/*.test.mjs` and `scripts/release-check.sh`. The tests run the shipped `mods/routing/main.js` outside Herdr, including the update pill's install script and the updater of every released version. A new panel test pins the demo fixture's cache-hit and multi-account readings.
+
+### Upgrade
+
+Nothing to migrate. From `0.3.x`, click the `↑ Update 0.3.3` pill in the panel's top bar. Older installs: copy the new `mods/routing` into `~/.config/herdr-app/mods/`, or re-run `./install.sh`.
 
 ## [0.3.2] - 2026-11-20
 
