@@ -14,7 +14,10 @@ tests read back the text it would draw.
   (`71% · 96%`, `Exhausted`, `0% · 80%`), its colours, pools, and a gateway
   reply with several accounts per provider drawn through the panel.
 - **`panel.test.mjs`**: the demo stage through `render()`. The `Requests`
-  header and when the update pill is drawn.
+  header, deterministic demo fold state, and when the update pill is drawn.
+- **`stage.test.mjs`**: topology stage invariants — only tried seats enter the
+  right column, active streams survive bursts of short requests without
+  leaving orphaned or flickering pills, and breathing elements carry stable ids.
 - **`update.test.mjs`**: when GitHub is asked, and the install. The mod's own
   install script runs for real against an archive on disk, including every
   way a download can be wrong. It also runs the updater of **every released

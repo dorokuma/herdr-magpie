@@ -8,6 +8,12 @@
   },
   "masked": true,
   "quotaOpen": false,
+  "expandedProviders": [
+    "antigravity"
+  ],
+  "expandedAccounts": [
+    "antigravity::u:pro@example.invalid"
+  ],
   "expandedRouteId": 104,
   "quotasAgo": 60,
   "agents": [
@@ -278,6 +284,116 @@
     }
   ],
   "quotas": {
+    "antigravity": {
+      "name": "Antigravity",
+      "accounts": [
+        {
+          "alias": "Ultra",
+          "user": "ultra@example.invalid",
+          "kind": "subscription",
+          "windows": [
+            {
+              "name": "Gemini · 7 days",
+              "remaining": 87,
+              "used": 13,
+              "resetsIn": 345600,
+              "pool": "Gemini"
+            },
+            {
+              "name": "Gemini · 5 hours",
+              "remaining": 97,
+              "used": 3,
+              "resetsIn": 10800,
+              "pool": "Gemini"
+            },
+            {
+              "name": "Claude & GPT · 7 days",
+              "remaining": 10,
+              "used": 90,
+              "resetsIn": 259200,
+              "pool": "Claude & GPT"
+            },
+            {
+              "name": "Claude & GPT · 5 hours",
+              "remaining": 100,
+              "used": 0,
+              "resetsIn": 14400,
+              "pool": "Claude & GPT"
+            }
+          ]
+        },
+        {
+          "alias": "Pro",
+          "user": "pro@example.invalid",
+          "kind": "subscription",
+          "windows": [
+            {
+              "name": "Gemini · 7 days",
+              "remaining": 92,
+              "used": 8,
+              "resetsIn": 345600,
+              "pool": "Gemini"
+            },
+            {
+              "name": "Gemini · 5 hours",
+              "remaining": 100,
+              "used": 0,
+              "resetsIn": 10800,
+              "pool": "Gemini"
+            },
+            {
+              "name": "Claude & GPT · 7 days",
+              "remaining": 100,
+              "used": 0,
+              "resetsIn": 259200,
+              "pool": "Claude & GPT"
+            },
+            {
+              "name": "Claude & GPT · 5 hours",
+              "remaining": 100,
+              "used": 0,
+              "resetsIn": 14400,
+              "pool": "Claude & GPT"
+            }
+          ]
+        },
+        {
+          "alias": "Team",
+          "user": "team@example.invalid",
+          "kind": "subscription",
+          "windows": [
+            {
+              "name": "Gemini · 7 days",
+              "remaining": 99,
+              "used": 1,
+              "resetsIn": 345600,
+              "pool": "Gemini"
+            },
+            {
+              "name": "Gemini · 5 hours",
+              "remaining": 62,
+              "used": 38,
+              "resetsIn": 10800,
+              "pool": "Gemini"
+            },
+            {
+              "name": "Claude & GPT · 7 days",
+              "remaining": 0,
+              "used": 100,
+              "resetsIn": 259200,
+              "pool": "Claude & GPT"
+            },
+            {
+              "name": "Claude & GPT · 5 hours",
+              "remaining": 100,
+              "used": 0,
+              "resetsIn": 14400,
+              "pool": "Claude & GPT"
+            }
+          ]
+        }
+      ]
+    },
     "claude": {
       "provider": "claude",
       "name": "Claude",
@@ -327,7 +443,6 @@
       ]
     },
     "codex": {
-      "left": 18,
       "name": "OpenAI Codex",
       "plan": "Pro Plan",
       "kind": "subscription",
@@ -340,16 +455,7 @@
         }
       ]
     },
-    "ai-studio": {
-      "left": null,
-      "name": "Google AI Studio",
-      "plan": "",
-      "kind": "subscription",
-      "hadText": true,
-      "windows": []
-    },
     "cursor": {
-      "left": 0,
       "name": "Cursor",
       "plan": "Pro Plan",
       "kind": "subscription",
@@ -363,11 +469,17 @@
       ]
     },
     "deepseek": {
-      "left": null,
       "name": "DeepSeek",
       "plan": "",
       "kind": "balance",
       "balance": "$48.20",
+      "windows": []
+    },
+    "ai-studio": {
+      "name": "Google AI Studio",
+      "plan": "",
+      "kind": "subscription",
+      "hadText": true,
       "windows": []
     }
   }

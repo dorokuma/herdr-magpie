@@ -112,11 +112,17 @@ const resolveIconName = (rawId, customMap) => {
   return "generic";
 };
 
-const iconEl = (id, size, color, customMap) => {
-  const n = resolveIconName(id, customMap);
+const iconNamed = (n, size, color) => {
   if (PNG_ICONS.has(n)) return image(`mods/routing/icons/${n}.png`).size(size).flex_none();
   return svg(`mods/routing/icons/${n}.svg`).size(size).flex_none().text_color(color);
 };
+const iconEl = (id, size, color, customMap) => iconNamed(resolveIconName(id, customMap), size, color);
+
+// A provider's name as drawn. The gateway appends how it reaches a provider
+// ("Antigravity (local agy CLI)"); in a row that also has to hold the readings
+// that note only pushes the name into an ellipsis. A parenthesis that tells two
+// providers apart ("StepFun (China)") is left alone.
+const provLabel = (name) => String(name ?? "").replace(/\s*\(local\b[^)]*\)\s*$/i, "") || String(name ?? "");
 
 const hueOf = (id) => {
   const s = String(id || "");
@@ -194,12 +200,17 @@ export default class Routing extends View {
       if (this.demo) return;
       const now = Date.now();
       let changed = false;
+      let goneAny = false;
       for (const [id, f] of this.flights) {
         const prevState = f.state;
         const prevPhase = f.phase;
         this.advance(f, now);
         if (f.state !== prevState || f.phase !== prevPhase) changed = true;
-        if (f.state === "gone") { this.flights.delete(id); changed = true; }
+        if (f.state === "gone") { this.flights.delete(id); changed = true; goneAny = true; }
+      }
+      if (goneAny) {
+        this.trimRoutes();
+        this.recompute();
       }
       for (const [k, t0] of this.shakes) if (now - t0 > 450) { this.shakes.delete(k); changed = true; }
       for (const [k, t0] of this.ticks) if (now - t0 > 400) { this.ticks.delete(k); changed = true; }
@@ -297,6 +308,12 @@ export default class Routing extends View {
     this.quotasAt = now - (d.quotasAgo ?? 60) * 1000;
     this.expandedRouteId = d.expandedRouteId ?? null;
     this.quotaOpen = Boolean(d.quotaOpen);
+    // what is unfolded and in which order is the fixture's to say, so the stage
+    // looks the same on every machine whatever was folded there before
+    this.expandedProviders = new Set((d.expandedProviders || []).map(String));
+    this.expandedAccounts = new Set((d.expandedAccounts || []).map(String));
+    this.providerOrder = [];
+    this.accountOrder = {};
     this.masked = d.masked !== false;
     this.loaded = true;
     this.configReady = true;
@@ -329,6 +346,7 @@ export default class Routing extends View {
         this.totals = d.totals || this.totals;
         this.pid = d.pid ?? this.pid;
         const first = !this.loaded;
+        const toStart = [];
         for (const r of d.routes) {
           for (const o of r.order || []) {
             if (o.id && o.icon && !String(o.icon).startsWith("file:")) {
@@ -340,18 +358,15 @@ export default class Routing extends View {
           }
           const isNew = !this.routes.has(r.id);
           this.routes.set(r.id, r);
-          if (isNew && (!first || !r.done)) this.start(r);
+          if (isNew && (!first || !r.done)) toStart.push(r);
         }
-        if (Array.isArray(d.ids)) {
-          const kept = new Set(d.ids);
-          for (const [id, r] of this.routes) if (!r.done && !kept.has(id)) this.routes.delete(id);
-        }
-        for (const id of [...this.routes.keys()].sort((a, b) => a - b).slice(0, -60)) this.routes.delete(id);
+        this.trimRoutes(d.ids);
         this.loaded = true;
         this.failCount = 0;
         if (this.offline) this.maybeCheckUpdate(cx, "online");
         this.offline = "";
         this.recompute();
+        for (const r of toStart) if (this.routes.has(r.id)) this.start(r);
         cx.notify();
       } catch (e) {
         this.failCount = (this.failCount || 0) + 1;
@@ -459,6 +474,35 @@ export default class Routing extends View {
     ] };
   }
 
+  // An account can hold several model families at once (Antigravity: a Gemini
+  // allowance and a Claude & GPT one, each a 5 hours inside a 7 days). One pair
+  // cannot stand for both: its tightest 5 hours and its tightest 7 days may
+  // belong to different families. So such an account reads as one quotaRead per
+  // family, each led by the family's own icon:
+  //     [gemini] 97% · 87%   [claude] 100% · 10%
+  // Pools that share an icon are one family (Gemini and a single Gemini model's
+  // weekly cap), read by the tightest of each column as any set of pools is.
+  // Returns [{ icon, allows }] in a fixed order, or null when there is nothing
+  // to tell apart: fewer than two families, a pool with no icon of its own to
+  // go by, allowances that are not pools, or nothing left anywhere (that is
+  // just "Exhausted").
+  quotaFamilies(allows) {
+    if (!allows || allows.length < 2) return null;
+    if (allows.every((a) => a.state === "spent")) return null;
+    const fams = new Map();
+    for (const a of allows) {
+      const pool = String(a.label || "").startsWith("s:") ? a.label.slice(2) : "";
+      const hit = pool ? ICON_PATTERNS.find(([re]) => re.test(pool)) : null;
+      if (!hit) return null;
+      if (!fams.has(hit[1])) fams.set(hit[1], []);
+      fams.get(hit[1]).push(a);
+    }
+    if (fams.size < 2) return null;
+    const rank = (icon) => (/gemini/.test(icon) ? 0 : /claude/.test(icon) ? 1 : 2);
+    return [...fams].map(([icon, list]) => ({ icon, allows: list }))
+      .sort((a, b) => rank(a.icon) - rank(b.icon) || a.icon.localeCompare(b.icon));
+  }
+
   normalizeQuotaItem(p, now = Date.now()) {
     const provider = String(p?.provider || p?.id || "unknown");
     const baseProvider = provider.replace(/^remote-magpie\//, "");
@@ -559,7 +603,8 @@ export default class Routing extends View {
 
   saveQuotaPrefs() {
     try {
-      if (typeof localStorage === "undefined") return;
+      // a demo stage's folds and order are demo.json's, never the person's own
+      if (this.demo || typeof localStorage === "undefined") return;
       localStorage.setItem("routing.quotaPrefs", JSON.stringify({
         quotaOpen: Boolean(this.quotaOpen),
         expandedProviders: [...this.expandedProviders],
@@ -807,14 +852,17 @@ export default class Routing extends View {
         this.seq = d.seq;
         this.totals = d.totals || this.totals;
         this.pid = d.pid ?? this.pid;
+        const toStart = [];
         for (const rt of d.routes) {
           const isNew = !this.routes.has(rt.id);
           this.routes.set(rt.id, rt);
-          if (isNew && !rt.done) this.start(rt);
+          if (isNew && !rt.done) toStart.push(rt);
         }
+        this.trimRoutes(d.ids);
         this.loaded = true;
         this.offline = "";
         this.recompute();
+        for (const rt of toStart) if (this.routes.has(rt.id)) this.start(rt);
       }
     } catch (_) { /* keep existing state */ }
     finally { this.traceBusy = false; cx.notify(); }
@@ -845,22 +893,75 @@ export default class Routing extends View {
     const d = Math.round(ms / 86400000);
     return `in ${d}d`;
   }
+  // Keep every active (!r.done) route and every route whose flight is still on
+  // stage; only evict finished history past 60, so a long stream isn't dropped
+  // and re-started as "new" on subsequent gateway deltas.
+  trimRoutes(ids) {
+    if (Array.isArray(ids)) {
+      const kept = new Set(ids);
+      for (const [id, r] of this.routes) {
+        if (!r.done && !kept.has(id)) {
+          this.routes.delete(id);
+          this.flights.delete(id);
+        }
+      }
+    }
+    const removable = [...this.routes.entries()]
+      .filter(([id, r]) => r.done && !this.flights.has(id))
+      .map(([id]) => id)
+      .sort((a, b) => a - b);
+    const keepDone = Math.max(0, 60 - (this.routes.size - removable.length));
+    for (const id of removable.slice(0, Math.max(0, removable.length - keepDone))) {
+      this.routes.delete(id);
+    }
+  }
+
+  // Resolve a seat actually tried by `r` into { key, name, who, model }, using
+  // `r.order` only as metadata lookup rather than populating untried fallbacks.
+  seatEntry(r, tr) {
+    if (!tr) return null;
+    const meta = (r.order || []).find((o) =>
+      (tr.id && (o.id === tr.id || o.who === tr.id)) ||
+      (!tr.id && tr.who && o.who === tr.who));
+    const key = tr.id || meta?.id || tr.who || meta?.who ||
+      ((tr.provider || meta?.provider) ? `${tr.provider || meta?.provider}/${tr.name || meta?.name || ""}` : "");
+    if (!key) return null;
+    return {
+      key,
+      name: provLabel(tr.name || meta?.name || tr.provider || meta?.provider || tr.who || meta?.who || key),
+      who: tr.who || meta?.who || "",
+      model: tr.model || meta?.model || r.served || r.model || "",
+    };
+  }
+
   recompute() {
-    const recent = [...this.routes.values()].sort((a, b) => b.id - a.id).slice(0, 40);
+    const all = [...this.routes.values()].sort((a, b) => b.id - a.id);
+    const isLive = (r) => {
+      if (!r.done) return true;
+      const f = this.flights.get(r.id);
+      return Boolean(f && f.state !== "gone");
+    };
+    const liveRoutes = all.filter(isLive);
+    const doneRoutes = all.filter((r) => !isLive(r)).slice(0, 40);
+    // Live / still-flying routes claim stage slots ahead of finished history,
+    // and only tried seats (`r.tries`) for on-stage agents enter the right
+    // column — untried fallback candidates never sit as unconnected pills.
+    const ordered = [...liveRoutes, ...doneRoutes];
     const agents = [], seenA = new Set();
-    for (const r of recent) {
+    for (const r of ordered) {
       const id = r.agent || "agent";
       if (!seenA.has(id)) { seenA.add(id); agents.push({ id, color: hueOf(id) }); }
       if (agents.length >= MAX_AGENTS) break;
     }
+    const onStageAgents = new Set(agents.map((a) => a.id));
     const accounts = [], seen = new Map();
-    for (const r of recent) {
-      for (const w of [...(r.order || []), ...(r.tries || [])]) {
-        const key = w.id || w.who || `${w.provider}/${w.name}`;
-        if (!key || seen.has(key)) continue;
-        seen.set(key, true);
-        accounts.push({ key, name: w.name || w.provider || w.who || "?", who: w.who || "",
-          model: w.model || r.model || "" });
+    for (const r of ordered) {
+      if (!onStageAgents.has(r.agent || "agent")) continue;
+      for (const tr of [...(r.tries || [])].reverse()) {
+        const seat = this.seatEntry(r, tr);
+        if (!seat || seen.has(seat.key)) continue;
+        seen.set(seat.key, true);
+        accounts.push(seat);
         if (accounts.length >= MAX_ACCOUNTS) break;
       }
       if (accounts.length >= MAX_ACCOUNTS) break;
@@ -913,18 +1014,16 @@ export default class Routing extends View {
   acctBox(key) { return this.geometry().acct(this.acctIndex(key)); }
 
   // the seat a try went to, as a row on the stage — a seat the column
-  // doesn't show yet joins it, so its flight isn't dropped
+  // doesn't show yet joins it only when its agent is on the stage too
   seatOf(r, i) {
-    const tr = r.tries?.[i];
-    if (!tr) return null;
-    let key = this.acctIndex(tr.id) >= 0 ? tr.id : null;
-    if (!key) {
-      const w = (r.order || []).find(w => w.id === tr.id || w.who === tr.id);
-      key = w ? (w.id || w.who) : tr.id;
-      if (this.acctIndex(key) < 0 && this.accounts.length < MAX_ACCOUNTS)
-        this.accounts.push({ key, name: w?.name || w?.who || tr.id, who: w?.who || "", model: tr.model || w?.model || "" });
+    const seat = this.seatEntry(r, r.tries?.[i]);
+    if (!seat) return null;
+    if (this.acctIndex(seat.key) >= 0) return seat.key;
+    if (this.agentIndex(r.agent || "agent") >= 0 && this.accounts.length < MAX_ACCOUNTS) {
+      this.accounts.push(seat);
+      return seat.key;
     }
-    return key;
+    return null;
   }
 
   // ---------- the bird's paths ----------
@@ -1012,9 +1111,10 @@ export default class Routing extends View {
 
   start(r) {
     const id = r.agent || "agent";
-    // an agent the column doesn't show yet joins it — the flight plays
-    // instead of being dropped
-    if (this.agentIndex(id) < 0) this.agents.push({ id, color: hueOf(id) });
+    // an agent the column doesn't show yet joins it when a slot is free
+    if (this.agentIndex(id) < 0 && this.agents.length < MAX_AGENTS) {
+      this.agents.push({ id, color: hueOf(id) });
+    }
     this.flights.set(r.id, {
       id: r.id, agent: id, color: hueOf(id),
       state: "wait", phase: null, tryIndex: 0, seat: null,
@@ -1121,8 +1221,18 @@ export default class Routing extends View {
   }
 
   beginTry(f, r) {
-    f.seat = this.seatOf(r, f.tryIndex);
-    if (!f.seat || !this.outSegs(f)) { f.tryIndex++; return; }
+    if (this.agentIndex(f.agent) < 0) {
+      if (r.done) f.state = "gone";
+      return;
+    }
+    const seat = this.seatOf(r, f.tryIndex);
+    if (!seat) {
+      if (r.done) f.state = "gone";
+      else f.tryIndex++;
+      return;
+    }
+    f.seat = seat;
+    if (!this.outSegs(f)) { f.seat = null; f.tryIndex++; return; }
     this.flyTo(f, () => this.outSegs(f) || [], "out",
       (L) => Math.max(1600, Math.min(7200, 5600 * L / 900)), { bird: "req" });
   }
@@ -1482,7 +1592,20 @@ export default class Routing extends View {
           .when(Boolean(g.strong), (el) => el.font_semibold())
           .child(g.text)));
       const plainEl = (text, color, size) => div().text_size(size).font_semibold().text_color(color).flex_none().child(text);
+      // a row too narrow for a pair per family gives each family its one number
+      const tightFams = W < 300;
       const statusEl = (allow, balance, error, size, compact = false) => {
+        const fams = compact ? null : this.quotaFamilies(allow);
+        if (fams) {
+          // every family the same width (room for "100% · 100%"), so the icons
+          // of the accounts listed under one provider stand in columns
+          const one = tightFams || fams.length > 2;
+          return h_flex().items_center().flex_none().gap(8)
+            .children(fams.map((f) => h_flex().items_center().flex_none().gap(3)
+              .child(iconNamed(f.icon, size + 1.5, t.muted))
+              .child(h_flex().items_center().flex_none().min_w(Math.round(size * (one ? 3 : 6)))
+                .child(readEl(this.quotaRead(f.allows, one), size)))));
+        }
         const read = this.quotaRead(allow, compact);
         if (read) return readEl(read, size);
         if (balance) return plainEl(String(balance), "#34d399", size);
@@ -1585,7 +1708,7 @@ export default class Routing extends View {
               })
               .child(div().w(8).text_size(9).text_color(t.dim).flex_none().child(provFolded ? "▸" : "▾"))
               .child(iconEl(id, 14, t.muted, this.providerIcons))
-              .child(div().text_size(10.5).font_semibold().truncate().flex_1().min_w(0).child(String(group.name || id)))
+              .child(div().text_size(10.5).font_semibold().truncate().flex_1().min_w(0).child(provLabel(group.name || id)))
               .when(Boolean(badge), (el) => el.child(div().text_size(8.5).text_color(t.dim).flex_none().child(`· ${badge}`)))
               .when(Boolean(who), (el) => el.child(div().text_size(8.5).text_color(t.muted).flex_none().max_w(90).truncate().child(`· ${who}`)))
               .when(Boolean(foldedStatus), (el) => el.child(foldedStatus))
@@ -1709,7 +1832,7 @@ export default class Routing extends View {
             })
             .child(div().w(8).text_size(9).text_color(t.dim).flex_none().child(provFolded ? "▸" : "▾"))
             .child(iconEl(id, 14, t.muted, this.providerIcons))
-            .child(div().text_size(10.5).font_semibold().truncate().flex_1().min_w(0).child(String(group.name || id)))
+            .child(div().text_size(10.5).font_semibold().truncate().flex_1().min_w(0).child(provLabel(group.name || id)))
             .when(Boolean(sharedPlan), (el) => el.child(div().text_size(8.5).text_color(t.dim).flex_none().child(`· ${sharedPlan}`)))
             .when(Boolean(grpEl), (el) => el.child(grpEl))
             .child(div().text_size(8.5).text_color(t.dim).flex_none().child(`${accounts.length} Accounts`)))
@@ -1745,7 +1868,7 @@ export default class Routing extends View {
           .children(rows))
         .child(Scrollbar.vertical("quota-body").absolute().inset_0());
       const shortName = (id, name) => {
-        const clean = String(name || id)
+        const clean = provLabel(name || id)
           .replace(/\s*·\s*Remote magpie$/i, "")
           .replace(/\s*\((China|International)\)$/i, "")
           .replace(/^Google\s+/i, "");
@@ -1813,8 +1936,11 @@ export default class Routing extends View {
     const live = [...this.routes.values()].some(r => !r.done);
     const liveAgents = new Set(), liveSeats = new Map();
     for (const f of this.flights.values()) {
+      if (f.state === "gone" || this.agentIndex(f.agent) < 0) continue;
       liveAgents.add(f.agent);
-      if (f.seat && f.state !== "gone") liveSeats.set(f.seat, f.color);
+      if (f.seat && f.state !== "away" && this.acctIndex(f.seat) >= 0) {
+        liveSeats.set(f.seat, f.color);
+      }
     }
 
     const children = [];
@@ -1822,6 +1948,7 @@ export default class Routing extends View {
     const wirePairs = new Map();
     for (const f of this.flights.values()) {
       if (!f.seat || f.state === "gone" || f.state === "away") continue;
+      if (this.agentIndex(f.agent) < 0 || this.acctIndex(f.seat) < 0) continue;
       const r = this.routes.get(f.id);
       const isLive = Boolean(r && !r.done) && f.phase !== "back";
       const pairKey = `${f.agent}\u0000${f.seat}`;
@@ -1834,26 +1961,29 @@ export default class Routing extends View {
       });
     }
     for (const r of [...this.routes.values()].filter(r => !r.done)) {
-      const tr = r.tries?.[r.tries.length - 1];
-      const key = tr?.id;
+      const agent = r.agent || "agent";
+      if (this.agentIndex(agent) < 0) continue;
+      liveAgents.add(agent);
+      const key = this.seatEntry(r, r.tries?.[r.tries.length - 1])?.key;
       if (!key || this.acctIndex(key) < 0) continue;
-      const pairKey = `${r.agent}\u0000${key}`;
+      liveSeats.set(key, hueOf(agent));
+      const pairKey = `${agent}\u0000${key}`;
       const prev = wirePairs.get(pairKey);
-      wirePairs.set(pairKey, { agent: r.agent, key, live: true, err: prev?.err || false });
+      wirePairs.set(pairKey, { agent, key, live: true, err: prev?.err || false });
     }
     const focusAgent = this.hoveredAgent || this.selectedAgent;
     const focusAcct = this.hoveredAcct || this.selectedAcct;
     if (focusAgent || focusAcct) {
       for (const r of this.routes.values()) {
-        const tr = r.tries?.[r.tries.length - 1];
-        const key = tr?.id;
-        if (!key || this.acctIndex(key) < 0) continue;
-        const matchFocus = (focusAgent && r.agent === focusAgent) ||
+        const agent = r.agent || "agent";
+        const key = this.seatEntry(r, r.tries?.[r.tries.length - 1])?.key;
+        if (!key || this.agentIndex(agent) < 0 || this.acctIndex(key) < 0) continue;
+        const matchFocus = (focusAgent && agent === focusAgent) ||
           (focusAcct && key === focusAcct);
         if (!matchFocus) continue;
-        const pairKey = `${r.agent}\u0000${key}`;
+        const pairKey = `${agent}\u0000${key}`;
         if (!wirePairs.has(pairKey)) {
-          wirePairs.set(pairKey, { agent: r.agent, key, live: false, err: Boolean(r.status && r.status >= 400) });
+          wirePairs.set(pairKey, { agent, key, live: false, err: Boolean(r.status && r.status >= 400) });
         }
       }
     }
@@ -1882,7 +2012,7 @@ export default class Routing extends View {
 
       if ((w.live || shaking) && (!hovering || matched)) {
         const glowPath = makeCurve(c, 4);
-        children.push(div().absolute().left(0).top(0).size_full()
+        children.push(div().id(`wire-glow-${w.agent}-${w.key}`).absolute().left(0).top(0).size_full()
           .loop("opacity", { from: 0.07, to: 0.22, period: 1400 })
           .child(window.paint_path(glowPath, color).absolute().left(0).top(0).size_full()));
       }
@@ -1890,7 +2020,7 @@ export default class Routing extends View {
       const corePath = makeCurve(c, strokeW);
       const baseOp = w.live ? 0.78 * dimFactor : (matched ? 0.62 : 0.32 * dimFactor);
       if ((w.live || shaking) && (!hovering || matched)) {
-        children.push(div().absolute().left(0).top(0).size_full()
+        children.push(div().id(`wire-core-${w.agent}-${w.key}`).absolute().left(0).top(0).size_full()
           .loop("opacity", { from: 0.56, to: 0.94, period: 1400 })
           .child(window.paint_path(corePath, color).absolute().left(0).top(0).size_full()));
       } else {
@@ -1952,7 +2082,7 @@ export default class Routing extends View {
           this.selectedAcct = null;
           cx2.notify();
         })
-        .child(div().size(6).rounded(3).bg(a.color).flex_none()
+        .child(div().id(`agent-dot-${a.id}`).size(6).rounded(3).bg(a.color).flex_none()
           .when(on, el => el.loop("opacity", { from: 1, to: .4, period: 1200 })))
         .child(div().text_size(11).font_semibold().truncate().min_w(0)
           .text_color(ticked ? t.accent : (on || hovered || selected) ? t.foreground : t.muted).child(a.id)));
@@ -1979,7 +2109,7 @@ export default class Routing extends View {
           this.selectedAgent = null;
           cx2.notify();
         })
-        .child(div().size(6).rounded(3).bg(errShake ? "#e26a6a" : hot ? "#d4b06a" : "#8a6d3f").flex_none()
+        .child(div().id(`acct-dot-${a.key}`).size(6).rounded(3).bg(errShake ? "#e26a6a" : hot ? "#d4b06a" : "#8a6d3f").flex_none()
           .when(hot, el => el.loop("opacity", { from: 1, to: .35, period: 1200 })))
         .child(div().text_size(11).font_semibold().min_w(0).flex_1().truncate()
           .text_color((hot || hovered || selected) ? t.foreground : t.muted).child(a.name))
@@ -1992,8 +2122,8 @@ export default class Routing extends View {
     const matchesFilter = (r) => {
       if (this.selectedAgent) return r.agent === this.selectedAgent;
       if (this.selectedAcct) {
-        return (r.tries || []).some(tr => tr.id === this.selectedAcct) ||
-          (r.tries?.length ? this.seatOf(r, r.tries.length - 1) === this.selectedAcct : false);
+        return (r.tries || []).some(tr =>
+          tr.id === this.selectedAcct || this.seatEntry(r, tr)?.key === this.selectedAcct);
       }
       return true;
     };
@@ -2041,7 +2171,7 @@ export default class Routing extends View {
         .when(Boolean(metrics), el => el.child(div().text_size(9.5).text_color(t.dim).min_w(0).truncate().child(metrics)))
         .children((r.tries || []).map((tr, idx) => {
           const tSeat = this.acctOf(tr.id);
-          const tName = tSeat?.name || tr.name || tr.id || "?";
+          const tName = tSeat?.name || provLabel(tr.name || tr.id || "?");
           const tFail = tr.done && tr.status && tr.status >= 400;
           const tCol = !tr.done ? "#facc15" : tFail ? "#e26a6a" : "#34d399";
           const tStat = !tr.done ? "active" : `${tr.status || "ok"}${tr.ms ? ` · ${this.fmtMs(tr.ms)}` : ""}`;
@@ -2063,7 +2193,7 @@ export default class Routing extends View {
           .child(group ? div().text_size(9.5).px(5).py(1).rounded(4).bg(t.canvas)
             .border(1).border_color(t.border).text_color(t.muted).flex_none().child(group) : div().w(0))
           .child(div().flex_1())
-          .child(div().size(5).rounded(3).bg(dotColor).flex_none()
+          .child(div().id(`req-dot-${r.id}`).size(5).rounded(3).bg(dotColor).flex_none()
             .when(!r.done, el => el.loop("opacity", { from: 1, to: .35, period: 1100 })))
           .child(div().text_size(10).text_color(t.dim).flex_none().child(time)))
         .child(h_flex().items_center().gap(6).pl(20)

@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadMod, texts, find, ROOT } from "./harness.mjs";
+import { loadMod, storage, texts, find, ROOT } from "./harness.mjs";
 
 // the stage demo.json describes, as config.json's "demo": true loads it
 async function demo() {
@@ -121,6 +121,52 @@ test("the demo still shows cache hits, tok/s and a multi-account two-window quot
   o.quotaOpen = false;
   const strip = texts(o.render(cx)).join(" ");
   assert.match(strip, /×2/, "the summary chip carries the account count");
+});
+
+// the Agent Quota block as drawn: icons by their file name, everything up to the Requests header
+const quota = (drawn) => drawn.slice(drawn.indexOf("Agent Quota"), drawn.indexOf("Requests"))
+  .map((s) => s.replace(/^mods\/routing\/icons\/([\w-]+)\.(png|svg)$/, "[$1]")).join(" ");
+
+test("the demo stage shows the current quota designs", async () => {
+  const { o, draw } = await demo();
+  // folded away: one number per provider, at most four of them
+  assert.ok(quota(draw()).includes("[antigravity-color] Antigravity ×3 99% [claudecode-color] Claude ×2 88% [codex-color] OpenAI Codex 18% [cursor] Cursor 0%"), quota(draw()));
+
+  o.quotaOpen = true;
+  const q = quota(draw());
+  // a pair per model family, each after its icon; a family with nothing left
+  assert.ok(q.includes("Ultra [gemini-color] 97% · 87% [claude-color] 100% · 10%"), q);
+  assert.ok(q.includes("Team [gemini-color] 62% · 99% [claude-color] Exhausted"), q);
+  // one account unfolded into the bars a pair stands for
+  assert.ok(q.includes("Pro Resets in 3d Gemini · 5 Hours 100% Gemini · 7 Days 92% Claude & GPT · 5 Hours 100% Claude & GPT · 7 Days 100%"), q);
+  // multi-account folded provider; lone amber window; exhausted; balance; ready
+  assert.ok(q.includes("Claude · Max Plan 76% · 88% 2 Accounts"), q);
+  assert.ok(q.includes("OpenAI Codex · Pro Plan 18%"), q);
+  assert.ok(q.includes("Cursor · Pro Plan Exhausted"), q);
+  assert.ok(q.includes("DeepSeek $48.20"), q);
+  assert.ok(q.includes("Google AI Studio Ready"), q);
+});
+
+test("a demo stage folds as demo.json says and never touches the person's own folds", async () => {
+  const mine = JSON.stringify({ quotaOpen: true, expandedProviders: ["my-provider"], expandedAccounts: ["my-provider::a:x"], providerOrder: ["my-provider", "claude"], accountOrder: { "my-provider": ["a:x"] } });
+  const store = storage(new Map([["routing.quotaPrefs", mine]]));
+  const m = await loadMod({ home: ROOT, store });
+  const o = m.make({ demo: true });
+  assert.deepEqual([...o.expandedProviders], ["my-provider"], "the person's folds are what init() reads");
+  await o.loadDemo(m.cx);
+  assert.equal(o.quotaOpen, false);
+  assert.deepEqual([...o.expandedProviders], ["antigravity"]);
+  assert.deepEqual([...o.expandedAccounts], ["antigravity::u:pro@example.invalid"]);
+  assert.deepEqual(o.orderedProviders().map(([id]) => id), ["antigravity", "claude", "codex", "cursor", "deepseek", "ai-studio"], "in demo.json's order, not the person's");
+
+  o.quotaOpen = true; o.expandedProviders.add("claude"); o.providerOrder = ["claude"];
+  o.saveQuotaPrefs();
+  assert.equal(store.data.get("routing.quotaPrefs"), mine, "the person's own folds are as they were");
+
+  const live = m.make();
+  live.expandedProviders.add("devin");
+  live.saveQuotaPrefs();
+  assert.deepEqual(JSON.parse(store.data.get("routing.quotaPrefs")).expandedProviders, ["my-provider", "devin"]);
 });
 
 test("before the gateway answers, the panel says so instead of drawing a stage", async () => {

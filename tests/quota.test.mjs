@@ -98,6 +98,41 @@ test("a number the gateway reports, a credit breakdown, and no percentage at all
   assert.equal(read(credits).text, "7%", "read off Total credits");
 });
 
+// --- an account that holds several model families ------------------------------
+
+const G = "gemini-color", C = "claude-color";
+const fams = (windows) => {
+  const f = o.quotaFamilies(o.normalizeQuotaItem({ provider: "x", windows }).allow);
+  return f && f.map((x) => [x.icon, o.quotaRead(x.allows).segs.map((g) => g.text).join(" ")]);
+};
+const pool = (name, h5, d7) => [W(`${name} · 7 days`, d7, "d", name), W(`${name} · 5 hours`, h5, "h", name)];
+
+test("two model families read as one pair each, never as one pair for both", () => {
+  // one pair would say "97% · 10%": a 5 hours from Gemini beside a 7 days from Claude
+  assert.deepEqual(fams([...pool("Gemini", 97, 87), ...pool("Claude & GPT", 100, 10)]), [[G, "97% · 87%"], [C, "100% · 10%"]]);
+  assert.deepEqual(fams([...pool("Claude & GPT", 100, 10), ...pool("Gemini", 97, 87)]).map((f) => f[0]), [G, C], "Gemini first, whatever order the gateway gives");
+});
+
+test("a family with nothing left says so beside the one that still has", () => {
+  assert.deepEqual(fams([...pool("Gemini", 62, 99), ...pool("Claude & GPT", 100, 0)]), [[G, "62% · 99%"], [C, "Exhausted"]]);
+  assert.deepEqual(fams([...pool("Gemini", 0, 99), ...pool("Claude & GPT", 100, 40)]), [[G, "0% · 99%"], [C, "100% · 40%"]]);
+  assert.equal(fams([...pool("Gemini", 100, 0), ...pool("Claude & GPT", 100, 0)]), null, "nothing left anywhere is one Exhausted, not two");
+});
+
+test("pools that share an icon are one family, read by its tightest", () => {
+  const w = [...pool("Gemini", 85, 65), ...pool("Claude & GPT", 100, 100), W("Gemini 4 Argon · 7 days", 24, "a", "Gemini 4 Argon")];
+  assert.deepEqual(fams(w), [[G, "85% · 24%"], [C, "100% · 100%"]]);
+});
+
+test("nothing to tell apart: the plain reading stays", () => {
+  assert.equal(fams(pool("Gemini", 97, 87)), null, "one family");
+  assert.equal(fams([W("5 hours", 71, "a"), W("7 days", 96, "b")]), null, "no pools at all");
+  assert.equal(fams([...pool("Gemini", 97, 87), W("Gemini 4 Argon · 7 days", 24, "a", "Gemini 4 Argon")]), null, "two pools, one icon");
+  assert.equal(fams([...pool("A", 97, 87), ...pool("B", 100, 10)]), null, "pools with no icon of their own to go by");
+  assert.equal(fams([...pool("Gemini", 97, 87), ...pool("Mystery", 100, 10)]), null, "one unknown pool: no icon is guessed for it");
+  assert.equal(fams([W("gemini-4-carbon", 0, "t"), W("claude-opus", 100, "t")]), null, "per-model meters are not pools");
+});
+
 // --- the gateway's reply, through the panel ------------------------------------
 
 const reply = fs.readFileSync(path.join(ROOT, "tests/fixtures/quotas.json"), "utf8");
@@ -141,12 +176,32 @@ test("folded provider rows read as designed", async () => {
   assert.match(row("quota-prov-hdr-stepfun"), /97%/);
   assert.match(row("quota-prov-hdr-arkapi"), /\$12\.50/);                // a balance
   assert.match(row("quota-prov-hdr-agentrouter-github"), /Error/);
+});
+
+const GEM = "mods/routing/icons/gemini-color.png", CLA = "mods/routing/icons/claude-color.png";
+
+test("a folded provider with two model families shows a pair per family, each after its icon", async () => {
+  const { row } = await panel();
   // agy-cli: per pool, the better-off of its two accounts.
-  //   Gemini        Ultra 5h 94 / 7d 75   (Pro: 85 / 65)
-  //   Claude & GPT  Pro   5h 100 / 7d 100 (Ultra: 100 / 10)
-  //   Gemini 4 Argon, Pro only: 7d 24
-  // short column = min(94, 100) = 94, long column = min(75, 100, 24) = 24
-  assert.match(row("quota-prov-hdr-agy-cli"), /94% · 24%/);
+  //   Gemini         Ultra 5h 94 / 7d 75   (Pro: 85 / 65)
+  //   Gemini 4 Argon Pro only: 7d 24       -> same icon as Gemini, so the Gemini family
+  //   Claude & GPT   Pro   5h 100 / 7d 100 (Ultra: 100 / 10)
+  // Gemini family: short 94, long min(75, 24) = 24. Claude family: 100, 100.
+  assert.ok(row("quota-prov-hdr-agy-cli").includes(`${GEM} 94% · 24% ${CLA} 100% · 100%`), row("quota-prov-hdr-agy-cli"));
+  // a provider with one family is drawn as before: no family icon before its numbers
+  assert.ok(!row("quota-prov-hdr-gemini-web").includes(`${GEM} 71%`), row("quota-prov-hdr-gemini-web"));
+});
+
+test("the note on how a provider is reached is not drawn; a region is", async () => {
+  const { p, cx, row } = await panel();
+  assert.equal(p.quotas["agy-cli"].name, "Antigravity (local agy CLI)", "what the gateway calls it");
+  assert.ok(row("quota-prov-hdr-agy-cli").includes(" Antigravity mods/"), row("quota-prov-hdr-agy-cli")); // the name, then the first family icon
+  assert.ok(row("quota-prov-hdr-stepfun").includes("StepFun (China)"), "a parenthesis that tells providers apart stays");
+  assert.doesNotMatch(texts(p.render(cx)).join(" "), /local agy/i, "nowhere on the open panel");
+  p.quotaOpen = false;
+  p.quotas = { "agy-cli": p.quotas["agy-cli"] };
+  const strip = texts(p.render(cx)).join(" ");
+  assert.ok(strip.includes("Antigravity ×2") && !/local agy/i.test(strip), strip);
 });
 
 test("an expanded provider lists each account with its own reading", async () => {
@@ -155,9 +210,26 @@ test("an expanded provider lists each account with its own reading", async () =>
   const ultra = row("quota-acct-hdr-agy-cli-u:ada@example.com");
   const pro = row("quota-acct-hdr-agy-cli-u:grace@example.com");
   assert.match(ultra, /Ultra/);
-  assert.match(ultra, /94% · 10%/); // short min(94, 100), long min(75, 10)
+  assert.ok(ultra.includes(`${GEM} 94% · 75% ${CLA} 100% · 10%`), ultra); // each family's own 5 hours and 7 days
   assert.match(pro, /Pro/);
-  assert.match(pro, /85% · 24%/);   // short min(85, 100), long min(65, 100, 24)
+  assert.ok(pro.includes(`${GEM} 85% · 24% ${CLA} 100% · 100%`), pro);    // Gemini: short 85, long min(65, Argon 24)
+});
+
+test("an unfolded account shows its bars instead of the folded reading", async () => {
+  const { p, row } = await panel();
+  p.expandedProviders.add("agy-cli");
+  p.expandedAccounts.add("agy-cli::u:ada@example.com");
+  assert.ok(!row("quota-acct-hdr-agy-cli-u:ada@example.com").includes(GEM), "no reading in the header of an open account");
+  const body = row("quota-acct-agy-cli-u:ada@example.com");
+  for (const bar of ["Gemini · 5 Hours", "Gemini · 7 Days", "Claude & GPT · 5 Hours", "Claude & GPT · 7 Days"]) assert.ok(body.includes(bar), bar);
+});
+
+test("a panel too narrow for two pairs gives each family its one number", async () => {
+  const { p, row } = await panel();
+  p.expandedProviders.add("agy-cli");
+  p.size = { width: 280, height: 200 };
+  const ultra = row("quota-acct-hdr-agy-cli-u:ada@example.com");
+  assert.ok(ultra.includes(`${GEM} 75% ${CLA} 10%`), ultra); // the long window of each
 });
 
 test("masked hides account addresses; unmasking shows them", async () => {
@@ -171,7 +243,13 @@ test("masked hides account addresses; unmasking shows them", async () => {
 
 test("the summary strip gives one number per provider", async () => {
   const { p, cx } = await panel({ quotaOpen: false });
-  const strip = texts(p.render(cx)).join(" ");
-  assert.doesNotMatch(strip, /\d+% · \d+%/, "no pairs in the strip");
-  assert.doesNotMatch(strip, /Exhausted/, "the strip says 0%");
+  const strip = () => texts(p.render(cx)).join(" ");
+  assert.doesNotMatch(strip(), /\d+% · \d+%/, "no pairs in the strip");
+  assert.doesNotMatch(strip(), /Exhausted/, "the strip says 0%");
+
+  // a provider with two model families is one number there too, with no family
+  // icons: the tightest long window among the pools it would read as a pair
+  p.quotas = { "agy-cli": p.quotas["agy-cli"] };
+  assert.ok(strip().includes("Antigravity ×2 24%"), strip());
+  assert.ok(!strip().includes(GEM) && !strip().includes(CLA), "no family icons in the strip");
 });

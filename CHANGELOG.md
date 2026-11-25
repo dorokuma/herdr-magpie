@@ -9,6 +9,30 @@ together at one version.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-11-25
+
+### Added
+
+- **Per-family folded quota readings (`mods/routing`).** Subscriptions that hold independent `5 hours` / `7 days` windows across distinct model families (such as Antigravity's Gemini and Claude & GPT pools) now render one icon-led `short% · long%` pair per family in fixed-width columns instead of mixing a short window from one family with a long window from another. Depleting one family shows `Exhausted` for that family alone; narrow panels (`< 300px`) fall back to each family's long-window percentage, and the collapsed summary strip remains a single number per provider.
+- **Stage topology test suite (`tests/stage.test.mjs`).** Adds offline invariants verifying that untried fallback candidates stay off the stage, slow active streams survive 60+ short-request bursts on other agents without orphaning or flickering, and every `.loop("opacity", ...)` element carries a stable `.id()`.
+
+### Changed
+
+- **Cleaner provider titles (`mods/routing`).** Strips gateway transport suffixes such as `(local agy CLI)` so `Antigravity` fits alongside multi-family quota readings without truncating, while preserving region/edition qualifiers like `StepFun (China)`.
+- **Refreshed offline demo fixture and preview (`mods/routing/demo.json`, `preview.png`).** Adds multi-family `Antigravity` accounts (`Ultra`, `Pro`, `Team`) to the demo stage and `preview.png`, and isolates demo fold/order state from the user's saved `localStorage` preferences.
+- **Unchanged components.** `layouts/Magpie.json` and `mods/tabs-routing` have no functional changes in `0.3.4` and are packaged together at the same version.
+
+### Fixed
+
+- **Orphaned / flickering account pills on the topology stage (`mods/routing`).**
+  - `trimRoutes()` now preserves active (`!r.done`) and still-flying routes when capping history at 60 entries, preventing a burst of short requests on one agent (e.g. `pig`) from evicting another agent's slow stream and repeatedly re-starting it on subsequent trace deltas.
+  - `recompute()` prioritizes active/flying routes ahead of the 40-route finished history and populates right-column pills strictly from actually tried seats (`r.tries`, using `r.order` only for display metadata), so untried fallback candidates no longer sit as unconnected pills.
+  - `seatOf()`, `beginTry()`, `matchesFilter()` and `liveSeats` require both endpoints to be on stage and avoid mutating `this.accounts` during `render()`, and all `.loop("opacity", ...)` elements now carry stable `.id()`s so conditional wire/pulse nodes never shift animation state.
+
+### Upgrade
+
+Nothing to migrate. From `0.3.0` or newer, click the `↑ Update 0.3.4` pill in the panel's top bar. Older installs: run the `releases/latest` install snippet in `README.md` or `./install.sh`.
+
 ## [0.3.3] - 2026-11-24
 
 ### Changed

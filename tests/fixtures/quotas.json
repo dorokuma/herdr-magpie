@@ -200,7 +200,7 @@
   },
   {
    "provider": "agy-cli",
-   "name": "agy-cli",
+   "name": "Antigravity (local agy CLI)",
    "kind": "subscription",
    "user": "ada@example.com",
    "alias": "Ultra",
@@ -241,7 +241,7 @@
   },
   {
    "provider": "agy-cli",
-   "name": "agy-cli",
+   "name": "Antigravity (local agy CLI)",
    "kind": "subscription",
    "user": "grace@example.com",
    "alias": "Pro",
