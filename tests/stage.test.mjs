@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadMod, find } from "./harness.mjs";
+import { loadMod, find, texts } from "./harness.mjs";
 
 test("untried fallback candidates in r.order do not appear as stage pills", async () => {
   const m = await loadMod();
@@ -159,4 +159,78 @@ test("an off-stage 5th concurrent agent cannot push an orphaned hot seat onto th
   const before = o.accounts.map((a) => a.key);
   assert.equal(find(o.render(m.cx), "acct-pill-seat-extra"), null);
   assert.deepEqual(o.accounts.map((a) => a.key), before);
+});
+
+test("stage pills right-anchor on wide panels, hard-truncate without ellipses, clip quota strip, and keep narrow request metrics", async () => {
+  const m = await loadMod();
+  const o = m.make({
+    loaded: true,
+    offline: "",
+    quotaOpen: false,
+    size: { width: 500, height: 600 },
+  });
+
+  // Hard truncation never appends ellipsis
+  const cut = o.fitText("StepFun (China)", 11, 45, true);
+  assert.ok(cut.length > 0 && cut.length < "StepFun (China)".length);
+  assert.ok(!cut.includes("\u2026") && !cut.includes("..."));
+
+  o.agents = [{ id: "pig", color: "#d4b06a" }];
+  o.accounts = [
+    { key: "stepfun", name: "StepFun (China)", who: "team@example.invalid", model: "step-5-preview" },
+    { key: "devin", name: "Devin", who: "", model: "swe-2-1" },
+  ];
+  o.quotas = o.groupQuotaEntries([
+    { provider: "antigravity", name: "Antigravity", allow: [{ label: "5h", left: 78 }] },
+    { provider: "workbuddy", name: "WorkBuddy", allow: [{ label: "5h", left: 16 }] },
+  ], Date.now());
+
+  const wideG = o.geometry();
+  assert.equal(wideG.acct(0).x2, 500 - 5, "wide panels anchor account pills to W - ax");
+  assert.ok(wideG.sky > Math.round(500 * 0.18), "wide panels stretch the middle wire corridor");
+
+  o.size = { width: 246, height: 600 };
+  const narrowG = o.geometry();
+  assert.ok(narrowG.sky >= 48, "narrow panels preserve the minimum wire corridor");
+
+  const now = Date.now();
+  o.routes.set(1, {
+    id: 1,
+    agent: "pig",
+    group: { ref: "group/worker" },
+    model: "swe-2-1",
+    served: "swe-2-1",
+    time: new Date(now - 31000).toISOString(),
+    done: false,
+    tries: [{ id: "devin", name: "Devin", done: false }],
+  });
+  o.routes.set(2, {
+    id: 2,
+    agent: "pig",
+    group: { ref: "group/verifier" },
+    model: "step-5-preview",
+    served: "step-5-preview",
+    time: new Date(now - 50000).toISOString(),
+    done: true,
+    status: 200,
+    tokens: 177000,
+    in: 2000,
+    out: 300,
+    ms: 9500,
+    usage: [{ in: 1000, cache_read: 99000 }],
+    tries: [{ id: "stepfun", name: "StepFun (China)", status: 200, done: true }],
+  });
+
+  const tree = o.render(m.cx);
+  assert.notEqual(find(tree, "quota-summary-clip"), null, "collapsed quota strip uses clipping container");
+
+  const activeRow = find(tree, "req-row-1");
+  const activeTexts = texts(activeRow);
+  assert.ok(activeTexts.some((s) => /^3[0-9]s$/.test(s)), "active timer omits trailing ellipsis");
+  assert.ok(!activeTexts.some((s) => s.includes("\u2026") || s.includes("...")), "active row has no ellipses");
+
+  const doneRow = find(tree, "req-row-2");
+  const doneTexts = texts(doneRow);
+  assert.ok(doneTexts.some((s) => s.includes("99% cached")), "narrow request row preserves cache-hit stat");
+  assert.ok(!doneTexts.some((s) => s.includes("\u2026") || s.includes("...")), "narrow request row hard-truncates without ellipses");
 });

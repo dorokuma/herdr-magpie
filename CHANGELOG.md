@@ -9,6 +9,20 @@ together at one version.
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-11-26
+
+### Changed
+
+- **UI display optimizations (`mods/routing`).**
+  - **Stage account pills:** Unified pill widths with symmetric `8px` left/right padding and right-aligned model names; on wide panels the right column stays anchored to the right edge so the middle wire corridor stretches naturally, while narrow panels keep the minimum wire corridor. All text truncation now hard-cuts cleanly without `...` ellipses.
+  - **Collapsed `Agent Quota` strip:** Preserves symmetric `10px` left/right margins via `#quota-summary-clip` and shows up to 6 providers so remaining horizontal space is used instead of leaving a wide blank gap or slicing chips against the border.
+  - **Requests list & active timers:** On narrow panels, hard-truncates provider names and drops secondary labels first so right-side metrics (including cache-hit rates) stay intact and aligned with the timestamp; removed the trailing `…` from active request elapsed timers.
+- **Unchanged components.** `layouts/Magpie.json` and `mods/tabs-routing` have no functional changes in `0.3.5` and are packaged together at the same version.
+
+### Upgrade
+
+Nothing to migrate. From `0.3.0` or newer, click the `↑ Update 0.3.5` pill in the panel's top bar. Older installs: run the `releases/latest` install snippet in `README.md` or `./install.sh`.
+
 ## [0.3.4] - 2026-11-25
 
 ### Added
