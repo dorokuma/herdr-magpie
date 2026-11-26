@@ -26,6 +26,8 @@ const SEMVER = /^\d+\.\d+\.\d+$/;
 const FRAME = 40;          // ms between animation frames, only while flying
 const MAX_AGENTS = 4;      // the stage's four, as in magpie
 const MAX_ACCOUNTS = 6;
+const STAGE_STYLES = ["magpie", "stream", "minimal"];
+const STAGE_STYLE_LABELS = { magpie: "Magpie", stream: "Stream", minimal: "Minimal" };
 
 const PAD = 12, ROW_H = 28, ROW_GAP = 8;
 
@@ -43,7 +45,7 @@ const BUILTIN_ICONS = {
   kiro: "kiro-color", githubcopilot: "githubcopilot", copilot: "copilot-color",
   github: "github", kimi: "kimi", moonshot: "moonshot", agy: "antigravity-color",
   "agy-cli": "antigravity-color", antigravity: "antigravity-color", crush: "crush",
-  magpie: "magpie", "remote-magpie": "magpie", workbuddy: "workbuddy-color",
+  alma: "alma-color", magpie: "magpie", "remote-magpie": "magpie", workbuddy: "workbuddy-color",
   "workbuddy-ai": "workbuddy-color", codebuddy: "codebuddy-color", devin: "devin",
   stepfun: "stepfun-color", arkapi: "arkapi", volcengine: "volcengine-color",
   doubao: "doubao-color", deepseek: "deepseek-color", qwen: "qwen-color",
@@ -69,7 +71,7 @@ const BUILTIN_ICONS = {
 const ICON_PATTERNS = [
   [/workbuddy/, "workbuddy-color"], [/codebuddy/, "codebuddy-color"], [/cline/, "cline"],
   [/ai-?studio|google/, "google-color"], [/gemini/, "gemini-color"],
-  [/agy|antigravity/, "antigravity-color"], [/claude|anthropic/, "claude-color"],
+  [/alma/, "alma-color"], [/agy|antigravity/, "antigravity-color"], [/claude|anthropic/, "claude-color"],
   [/codex/, "codex-color"], [/openai|gpt/, "openai"], [/deepseek/, "deepseek-color"],
   [/qwen|bailian|alibaba/, "qwen-color"], [/glm|zhipu/, "zhipu-color"],
   [/minimax/, "minimax-color"], [/step/, "stepfun-color"], [/devin/, "devin"],
@@ -83,7 +85,7 @@ const ICON_PATTERNS = [
 ];
 
 const PNG_ICONS = new Set([
-  "pig", "crush", "arkapi", "aihubmix-color", "alibabacloud-color", "antigravity-color",
+  "pig", "crush", "arkapi", "aihubmix-color", "alibabacloud-color", "alma-color", "antigravity-color",
   "azure-color", "baichuan-color", "baidu-color", "bailian-color", "bedrock-color",
   "chatglm-color", "claude-color", "claudecode-color", "cloudflare-color", "codebuddy-color",
   "codex-color", "cohere-color", "copilot-color", "deepinfra-color", "deepseek-color",
@@ -185,6 +187,9 @@ export default class Routing extends View {
     this.updateBusy = false;
     this.updateError = "";
     this.loadUpdateState();
+    this.stageStyle = "magpie";
+    this.stageHovered = false;
+    this.loadStagePrefs();
     this.demo = false; // config.json's "demo": renders mods/routing/demo.json, asks no gateway
 
     cx.spawn(async (cx) => {
@@ -214,9 +219,10 @@ export default class Routing extends View {
       }
       for (const [k, t0] of this.shakes) if (now - t0 > 450) { this.shakes.delete(k); changed = true; }
       for (const [k, t0] of this.ticks) if (now - t0 > 400) { this.ticks.delete(k); changed = true; }
-      const animating = [...this.flights.values()].some((f) => f.state === "fly") ||
-        this.shakes.size > 0 || this.ticks.size > 0;
       const inFlightAny = [...this.routes.values()].some((r) => !r.done);
+      const needsFlow = inFlightAny && this.stageStyle !== "minimal";
+      const animating = needsFlow || [...this.flights.values()].some((f) => f.state === "fly") ||
+        this.shakes.size > 0 || this.ticks.size > 0;
       const secTick = inFlightAny && (now - this.lastSecTick >= 1000);
       if (secTick) this.lastSecTick = now;
       if (animating || changed || secTick) cx.notify();
@@ -237,11 +243,14 @@ export default class Routing extends View {
         if (cfg.baseUrl) this.baseUrl = String(cfg.baseUrl).replace(/\/$/, "");
         if (cfg.label) this.remoteLabel = String(cfg.label);
         else if (this.remote) this.remoteLabel = `${this.remote} · ${this.baseUrl.replace(/^https?:\/\//, "")}`;
+        if (cfg.stageStyle && STAGE_STYLES.includes(cfg.stageStyle)) this.stageStyle = cfg.stageStyle;
       }
     } catch (_) { /* optional config.json */ }
     if (cfg?.demo) {
       this.demo = true;
       await this.loadDemo(cx);
+      if (cfg.stageStyle && STAGE_STYLES.includes(cfg.stageStyle)) this.stageStyle = cfg.stageStyle;
+      cx.notify();
       return;
     }
     this.configReady = true;
@@ -1022,15 +1031,18 @@ export default class Routing extends View {
 
   geometry() {
     const W = this.size.width || 336;
-    // the stage is always a full column tall — rows appearing or leaving
-    // can't bounce the card and the list below it
-    const n = Math.max(MAX_AGENTS, MAX_ACCOUNTS);
-    const H = Math.max(2 * PAD + n * ROW_H - ROW_GAP + 10, 120);
+    // Adaptive height: fit active stage rows with symmetric top/bottom padding
+    // (at least 1 row so an empty stage still reads cleanly as a card)
+    const n = Math.max(1, (this.agents || []).length, (this.accounts || []).length);
+    const H = 2 * PAD + n * ROW_H;
     const cy = (i) => PAD + i * ROW_H + ROW_H / 2;
     const ax = W < 280 ? 2 : 5;
-    const agentNeed = (this.agents || []).reduce((m, a) => Math.max(m, 27 + this.estTextW(a?.id, 11)), 54);
-    const agentMax = Math.min(82, Math.max(64, Math.round(W * 0.23)));
-    const agentW = Math.max(52, Math.min(agentMax, agentNeed));
+    // Left pill chrome: BORDER(2) + px(6)*2(12) + ICON_BOX(13) + GAP(4) = 31
+    const AGENT_CHROME = 31;
+    const agentNeed = (this.agents || []).reduce(
+      (m, a) => Math.max(m, AGENT_CHROME + this.estTextW(a?.id, 11, true)), 56);
+    const agentMax = Math.min(104, Math.max(82, Math.round(W * 0.30)));
+    const agentW = Math.max(56, Math.min(agentMax, agentNeed));
 
     const BORDER = 2, PAD_X = 8, DOT = 6, DOT_GAP = 6, COL_GAP = 10;
     const hasModel = (this.accounts || []).some((a) => Boolean(a?.model));
@@ -1406,6 +1418,27 @@ export default class Routing extends View {
   //   online           the gateway came back and the last look had failed
   //   failed look      again after UPDATE_RETRY (2m, 10m, 30m, then hourly)
   //   install          the release is resolved once more right before it is laid down
+  loadStagePrefs() {
+    try {
+      const v = typeof localStorage !== "undefined" ? localStorage.getItem("routing.stageStyle") : null;
+      if (v && STAGE_STYLES.includes(v)) this.stageStyle = v;
+    } catch (_) { /* ignore storage errors */ }
+  }
+
+  saveStagePrefs() {
+    if (this.demo) return;
+    try {
+      if (typeof localStorage !== "undefined") localStorage.setItem("routing.stageStyle", this.stageStyle);
+    } catch (_) { /* ignore storage errors */ }
+  }
+
+  cycleStageStyle(cx) {
+    const i = STAGE_STYLES.indexOf(this.stageStyle);
+    this.stageStyle = STAGE_STYLES[(i + 1) % STAGE_STYLES.length];
+    this.saveStagePrefs();
+    cx.notify();
+  }
+
   loadUpdateState() {
     try {
       const raw = typeof localStorage !== "undefined" ? localStorage.getItem("routing.update") : null;
@@ -1991,6 +2024,8 @@ export default class Routing extends View {
     const liveAgents = new Set(), liveSeats = new Map();
     for (const f of this.flights.values()) {
       if (f.state === "gone" || this.agentIndex(f.agent) < 0) continue;
+      const r = this.routes.get(f.id);
+      if (r && r.done && f.state !== "fly") continue;
       liveAgents.add(f.agent);
       if (f.seat && f.state !== "away" && this.acctIndex(f.seat) >= 0) {
         liveSeats.set(f.seat, f.color);
@@ -1999,6 +2034,7 @@ export default class Routing extends View {
 
     const children = [];
 
+    const animNow = this.demo ? 620 : now;
     const wirePairs = new Map();
     for (const f of this.flights.values()) {
       if (!f.seat || f.state === "gone" || f.state === "away") continue;
@@ -2043,8 +2079,11 @@ export default class Routing extends View {
     }
 
     const hovering = Boolean(focusAgent || focusAcct);
+    const hasLive = liveAgents.size > 0 && !hovering;
     const orderedWires = [...wirePairs.values()].sort((a, b) => Number(a.live) - Number(b.live));
     const portDots = new Map();
+    const birds = [];
+    let activeIdx = 0;
 
     const makeCurve = (c, width) => {
       const pb = PathBuilder.stroke(width).move_to(c.x0, c.y0);
@@ -2054,6 +2093,18 @@ export default class Routing extends View {
       ).build();
     };
 
+    const sliceCurvePath = (poly, s0, s1, width) => {
+      if (!poly || s1 - s0 < 1.5) return null;
+      const p0 = this.pointAt(poly, s0);
+      let pb = PathBuilder.stroke(width).move_to(p0.x, p0.y);
+      const steps = Math.max(1, Math.ceil((s1 - s0) / 1.5));
+      for (let step = 1; step <= steps; step++) {
+        const p = this.pointAt(poly, s0 + ((s1 - s0) * step) / steps);
+        pb = pb.line_to(p.x, p.y);
+      }
+      return pb.build();
+    };
+
     for (const w of orderedWires) {
       const c = this.curveBetween(this.agentIndex(w.agent), this.acctIndex(w.key));
       if (!c) continue;
@@ -2061,52 +2112,124 @@ export default class Routing extends View {
       const color = shaking ? "#e26a6a" : hueOf(w.agent);
       const matched = (focusAgent && w.agent === focusAgent) ||
         (focusAcct && w.key === focusAcct);
-      const dimFactor = hovering ? (matched ? 1 : 0.16) : 1;
+      const dimFactor = hovering ? (matched ? 1 : 0.16) : (hasLive && !w.live && !shaking ? 0.35 : 1);
       const strokeW = matched ? 2 : (w.live ? 1.5 : 1.25);
+      const wireActive = (w.live || shaking) && (!hovering || matched);
 
-      if ((w.live || shaking) && (!hovering || matched)) {
-        const glowPath = makeCurve(c, 4);
-        children.push(div().id(`wire-glow-${w.agent}-${w.key}`).absolute().left(0).top(0).size_full()
-          .loop("opacity", { from: 0.07, to: 0.22, period: 1400 })
-          .child(window.paint_path(glowPath, color).absolute().left(0).top(0).size_full()));
-      }
+      if (wireActive) {
+        if (this.stageStyle === "stream") {
+          const glowPath = makeCurve(c, 3.5);
+          children.push(div().id(`wire-glow-${w.agent}-${w.key}`).absolute().left(0).top(0).size_full()
+            .loop("opacity", { from: 0.06, to: 0.16, period: 1400 })
+            .child(window.paint_path(glowPath, color).absolute().left(0).top(0).size_full()));
 
-      const corePath = makeCurve(c, strokeW);
-      const baseOp = w.live ? 0.78 * dimFactor : (matched ? 0.62 : 0.32 * dimFactor);
-      if ((w.live || shaking) && (!hovering || matched)) {
-        children.push(div().id(`wire-core-${w.agent}-${w.key}`).absolute().left(0).top(0).size_full()
-          .loop("opacity", { from: 0.56, to: 0.94, period: 1400 })
-          .child(window.paint_path(corePath, color).absolute().left(0).top(0).size_full()));
+          const corePath = makeCurve(c, 1.25);
+          children.push(div().id(`wire-core-${w.agent}-${w.key}`).absolute().left(0).top(0).size_full()
+            .opacity(0.32)
+            .child(window.paint_path(corePath, color).absolute().left(0).top(0).size_full()));
+
+          const poly = this.flat([c.seg]);
+          if (poly && poly.L > 12) {
+            const idx = activeIdx++;
+            const shuttleMs = 1800;
+            const u = ((animNow + idx * 900) % shuttleMs) / shuttleMs;
+            const goingLeft = u >= 0.5;
+            const p = easeIO(goingLeft ? (u - 0.5) * 2 : u * 2);
+            const headS = goingLeft ? (1 - p) * poly.L : p * poly.L;
+            const beamLen = Math.min(24, poly.L * 0.42);
+            const s0 = goingLeft ? headS : Math.max(0, headS - beamLen);
+            const s1 = goingLeft ? Math.min(poly.L, headS + beamLen) : headS;
+            const leadLen = (s1 - s0) * 0.65;
+            const l0 = goingLeft ? headS : Math.max(0, headS - leadLen);
+            const l1 = goingLeft ? Math.min(poly.L, headS + leadLen) : headS;
+            const op = Math.min(1, Math.sin(Math.PI * p) * 3.5);
+            if (op > 0.02) {
+              const outer = sliceCurvePath(poly, s0, s1, 3.6);
+              if (outer) {
+                children.push(window.paint_path(outer, color).absolute().left(0).top(0).size_full()
+                  .opacity(0.30 * op));
+              }
+              const inner = sliceCurvePath(poly, l0, l1, 2.0);
+              if (inner) {
+                children.push(window.paint_path(inner, color).absolute().left(0).top(0).size_full()
+                  .opacity(0.95 * op));
+              }
+              const hp = this.pointAt(poly, headS);
+              children.push(div().absolute().left(hp.x - 3.5).top(hp.y - 3.5).size(7).rounded(3.5)
+                .bg(color).opacity(0.25 * op));
+              children.push(div().absolute().left(hp.x - 1.9).top(hp.y - 1.9).size(3.8).rounded(1.9)
+                .bg(color).opacity(op));
+            }
+          }
+        } else {
+          const glowPath = makeCurve(c, 3.5);
+          children.push(div().id(`wire-glow-${w.agent}-${w.key}`).absolute().left(0).top(0).size_full()
+            .loop("opacity", { from: 0.08, to: 0.20, period: 1400 })
+            .child(window.paint_path(glowPath, color).absolute().left(0).top(0).size_full()));
+
+          const corePath = makeCurve(c, strokeW);
+          children.push(div().id(`wire-core-${w.agent}-${w.key}`).absolute().left(0).top(0).size_full()
+            .loop("opacity", { from: 0.58, to: 0.92, period: 1400 })
+            .child(window.paint_path(corePath, color).absolute().left(0).top(0).size_full()));
+
+          if (this.stageStyle === "magpie") {
+            const poly = this.flat([c.seg]);
+            if (poly && poly.L > 12) {
+              const idx = activeIdx++;
+              const shuttleMs = 2400;
+              const u = ((animNow + idx * 1180) % shuttleMs) / shuttleMs;
+              const goingLeft = u >= 0.5;
+              const p = easeIO(goingLeft ? (u - 0.5) * 2 : u * 2);
+              const edge = Math.min(4, poly.L * 0.10);
+              const dist = goingLeft
+                ? (poly.L - edge - p * (poly.L - 2 * edge))
+                : (edge + p * (poly.L - 2 * edge));
+              const pt = this.pointAt(poly, dist);
+              const bob = Math.sin(animNow / 115 + idx * 2.1) * 1.1;
+              const op = Math.min(1, Math.sin(Math.PI * p) * 3.2);
+              if (op > 0.02) {
+                const BIRD = 15;
+                const birdSvg = goingLeft ? "mods/routing/icons/magpie-l.svg" : "mods/routing/icons/magpie.svg";
+                const birdLeft = pt.x - (goingLeft ? 0.5 : 14.5);
+                const birdTop = pt.y - 4.2 + bob;
+                birds.push(div().absolute().left(pt.x - 3.5).top(pt.y - 3.5).size(7).rounded(3.5)
+                  .bg(color).opacity(0.28 * op));
+                birds.push(div().absolute().left(pt.x - 1.75).top(pt.y - 1.75).size(3.5).rounded(1.75)
+                  .bg(color).opacity(0.95 * op));
+                birds.push(svg(birdSvg).absolute().left(birdLeft).top(birdTop).size(BIRD)
+                  .text_color(t.foreground).opacity(0.92 * op));
+              }
+            }
+          }
+        }
       } else {
+        const corePath = makeCurve(c, strokeW);
+        const baseOp = w.live ? 0.78 * dimFactor : (matched ? 0.62 : 0.32 * dimFactor);
         children.push(window.paint_path(corePath, color).absolute().left(0).top(0).size_full()
           .opacity(baseOp));
       }
 
-      const portOp = w.live ? 0.9 * dimFactor : (matched ? 0.75 : 0.45 * dimFactor);
+      const portOp = w.live ? 0.95 * dimFactor : (matched ? 0.75 : 0.45 * dimFactor);
       const p0Key = `a:${w.agent}`;
       const p1Key = `s:${w.key}`;
       const cur0 = portDots.get(p0Key);
-      if (!cur0 || portOp > cur0.op) portDots.set(p0Key, { x: c.x0, y: c.y0, color, op: portOp });
+      if (!cur0 || portOp > cur0.op || wireActive) {
+        portDots.set(p0Key, { key: p0Key, x: c.x0, y: c.y0, color, op: portOp, live: Boolean(cur0?.live || wireActive) });
+      }
       const cur1 = portDots.get(p1Key);
-      if (!cur1 || portOp > cur1.op) portDots.set(p1Key, { x: c.x3, y: c.y3, color, op: portOp });
+      if (!cur1 || portOp > cur1.op || wireActive) {
+        portDots.set(p1Key, { key: p1Key, x: c.x3, y: c.y3, color, op: portOp, live: Boolean(cur1?.live || wireActive) });
+      }
     }
 
     for (const p of portDots.values()) {
-      children.push(div().absolute().left(p.x - 1.75).top(p.y - 1.75).size(3.5).rounded(2)
-        .bg(p.color).opacity(p.op));
-    }
-
-    for (const f of this.flights.values()) {
-      if (f.state !== "fly" || !f.pos) continue;
-      const matched = !hovering ||
-        (focusAgent && f.agent === focusAgent) ||
-        (focusAcct && f.seat === focusAcct);
-      const pColor = f.err ? "#e26a6a" : hueOf(f.agent);
-      const op = matched ? 1 : 0.2;
-      children.push(div().absolute().left(f.pos.x - 4).top(f.pos.y - 4).size(8).rounded(4)
-        .bg(pColor).opacity(0.28 * op));
-      children.push(div().absolute().left(f.pos.x - 2).top(f.pos.y - 2).size(4).rounded(2)
-        .bg(pColor).opacity(0.95 * op));
+      if (p.live) {
+        children.push(div().id(`port-live-${p.key}`).absolute().left(p.x - 2).top(p.y - 2).size(4).rounded(2)
+          .bg(p.color).loop("opacity", { from: 0.55, to: 1.0, period: 1100 }));
+      } else {
+        children.push(div().absolute().left(p.x - 1.75).top(p.y - 1.75).size(3.5).rounded(2)
+          .bg(p.color).opacity(p.op));
+      }
     }
 
     const shake = (key) => {
@@ -2116,16 +2239,24 @@ export default class Routing extends View {
       return p < .2 ? -5 * p / .2 : p < .4 ? -5 + 9 * (p - .2) / .2 : p < .6 ? 4 - 6 * (p - .4) / .2 : p < .8 ? -2 + 3 * (p - .6) / .2 : 1 - (p - .8) / .2;
     };
 
-    // agent chips: bordered pills, click to filter, hover to highlight
+    // agent chips: bordered pills with client icons, restrained spotlight when active
     for (let i = 0; i < this.agents.length; i++) {
       const a = this.agents[i], b = g.agent(i);
       const on = liveAgents.has(a.id), ticked = this.ticks.has(a.id);
       const hovered = this.hoveredAgent === a.id;
       const selected = this.selectedAgent === a.id;
+      const iconName = resolveIconName(a.id, this.providerIcons);
+      const leading = iconName !== "generic"
+        ? div().id(`agent-icon-${a.id}`).size(13).flex_none().flex().items_center().justify_center()
+            .rounded(3).overflow_hidden()
+            .child(iconNamed(iconName, 13, a.color))
+        : div().id(`agent-icon-${a.id}`).size(13).flex_none().flex().items_center().justify_center()
+            .child(div().size(6).rounded(3).bg(a.color));
       children.push(h_flex().id(`agent-pill-${a.id}`).absolute().left(b.x1 + shake(a.id)).top(b.cy - 13).w(g.agentW).h(26)
-        .items_center().gap(5).px(7).rounded(13).cursor_pointer()
-        .bg(selected ? t.selected : hovered ? t.raised : t.canvas)
-        .border(1).border_color(selected ? t.accent : hovered ? t.selected : t.border)
+        .items_center().gap(4).px(6).rounded(13).cursor_pointer()
+        .bg(selected ? t.selected : on ? rgba(a.color, 0.08) : hovered ? t.raised : t.canvas)
+        .border(1).border_color(selected ? t.accent : on ? rgba(a.color, 0.85) : hovered ? t.selected : t.border)
+        .when(!on && hasLive && !hovered && !selected, el => el.opacity(0.48))
         .on_hover((isOn, cx2) => {
           if (isOn) this.hoveredAgent = a.id;
           else if (this.hoveredAgent === a.id) this.hoveredAgent = null;
@@ -2136,11 +2267,10 @@ export default class Routing extends View {
           this.selectedAcct = null;
           cx2.notify();
         })
-        .child(div().id(`agent-dot-${a.id}`).size(6).rounded(3).bg(a.color).flex_none()
-          .when(on, el => el.loop("opacity", { from: 1, to: .4, period: 1200 })))
+        .child(leading)
         .child(div().text_size(11).font_semibold().min_w(0).overflow_hidden().whitespace_nowrap()
           .text_color(ticked ? t.accent : (on || hovered || selected) ? t.foreground : t.muted)
-          .child(this.fitText(a.id, 11, Math.max(12, g.agentW - 27), true))));
+          .child(this.fitText(a.id, 11, Math.max(12, g.agentW - 31), true))));
     }
     // Account pills: exact zero-overflow horizontal accounting.
     //   pillW = BORDER(2) + PAD_X*2(16) + DOT(6) + DOT_GAP(6) [+ COL_GAP(10)] + name + model
@@ -2194,11 +2324,14 @@ export default class Routing extends View {
       }
       const nameTxt = this.fitText(a.name, 11, rowNameMax, true);
       const modelTxt = a.model ? this.fitText(a.model, 9.5, rowModelMax, false) : "";
+      const hotColor = errShake ? "#e26a6a" : hot;
       children.push(h_flex().id(`acct-pill-${a.key}`).absolute().left(b.x1 + shake(a.key)).top(b.cy - 13)
         .w(pillW).h(26).overflow_hidden()
         .items_center().px(PAD_X).rounded(13).cursor_pointer()
-        .bg(selected ? t.selected : (hot || hovered) ? t.raised : t.canvas)
-        .border(1).border_color(errShake ? "#e26a6a" : selected ? t.accent : (hot || hovered) ? t.selected : t.border)
+        .bg(selected ? t.selected : hot ? rgba(hotColor, 0.07) : hovered ? t.raised : t.canvas)
+        .border(1)
+        .border_color(errShake ? "#e26a6a" : selected ? t.accent : hot ? rgba(hot, 0.75) : hovered ? t.selected : t.border)
+        .when(!hot && hasLive && !hovered && !selected, el => el.opacity(0.48))
         .on_hover((isOn, cx2) => {
           if (isOn) this.hoveredAcct = a.key;
           else if (this.hoveredAcct === a.key) this.hoveredAcct = null;
@@ -2212,8 +2345,8 @@ export default class Routing extends View {
         .child(h_flex().items_center().gap(DOT_GAP).flex_none().min_w(0).overflow_hidden()
           .max_w(DOT + DOT_GAP + rowNameMax)
           .child(div().id(`acct-dot-${a.key}`).size(DOT).rounded(3)
-            .bg(errShake ? "#e26a6a" : hot ? "#d4b06a" : "#8a6d3f").flex_none()
-            .when(hot, el => el.loop("opacity", { from: 1, to: .35, period: 1200 })))
+            .bg(errShake ? "#e26a6a" : hot ? hot : "#8a6d3f").flex_none()
+            .when(hot, el => el.loop("opacity", { from: 1, to: .4, period: 1200 })))
           .child(div().text_size(11).font_semibold().min_w(0).max_w(rowNameMax)
             .overflow_hidden().whitespace_nowrap()
             .text_color((hot || hovered || selected) ? t.foreground : t.muted)
@@ -2225,8 +2358,9 @@ export default class Routing extends View {
             .child(modelTxt))));
     }
 
-    // the flights over everything: no bird, no packet — the wire itself
-    // carries the life: live wires breathe, finished ones fade out
+    for (const b of birds) children.push(b);
+
+    // Active stage flows render according to stageStyle (magpie / stream / minimal).
 
     const matchesFilter = (r) => {
       if (this.selectedAgent) return r.agent === this.selectedAgent;
@@ -2353,14 +2487,31 @@ export default class Routing extends View {
         .child(div().text_size(9.5).text_color(t.dim).min_w(0).truncate().child(this.remoteLabel)))
       .when(this.offline, el => el.child(div().px(12).py(16).text_size(11.5).text_color(t.muted).child(this.offline)))
       .when(!this.offline, el => el
-        .child(div().mx(10).mb(8).p(6).rounded(10).bg(t.canvas).border(1).border_color(t.border)
+        .child(div().id("stage-card").relative().mx(10).mb(8).p(6).rounded(10).bg(t.canvas).border(1).border_color(t.border)
+          .on_hover((isOn, cx2) => { if (this.stageHovered !== isOn) { this.stageHovered = isOn; cx2.notify(); } })
           .child(div().relative().w_full().h(g.H)
             .id("stage").on_size_change((size, cx) => {
               const zoom = settings().zoom || 1;
-              this.size = { width: size.width / zoom, height: size.height / zoom };
-              cx.notify();
+              const w = size.width / zoom, h = size.height / zoom;
+              const widthChanged = Math.abs(w - this.size.width) >= 0.5;
+              this.size = { width: w, height: h };
+              if (widthChanged) cx.notify();
             })
-            .children(children)))
+            .children(children))
+          .when(this.stageHovered, el2 => el2.child(
+            h_flex().id("stage-style-toggle").absolute().right(6).bottom(5)
+              .px(6).py(2).gap(4).rounded(6).items_center().cursor_pointer()
+              .bg(t.surface).border(1).border_color(t.border)
+              .hover(s => s.bg(t.hover).border_color(t.selected))
+              .tooltip(`Stage style: ${STAGE_STYLE_LABELS[this.stageStyle]} (click to switch)`)
+              .on_click((_, cx2) => { cx2.stop_propagation(); this.cycleStageStyle(cx2); })
+              .child(this.stageStyle === "magpie"
+                ? svg("mods/routing/icons/magpie.svg").size(10).flex_none().text_color(t.accent)
+                : this.stageStyle === "stream"
+                  ? svg("mods/routing/route.svg").size(10).flex_none().text_color(t.accent)
+                  : div().size(6).rounded(3).bg(t.muted).flex_none())
+              .child(div().text_size(9).font_medium().text_color(t.muted)
+                .child(STAGE_STYLE_LABELS[this.stageStyle])))))
         .child(this.quotaPanel(t))
         .child(h_flex().px(12).pt(2).pb(2).gap(6).items_center()
           .child(div().text_size(11).font_semibold().flex_none().child("Requests"))

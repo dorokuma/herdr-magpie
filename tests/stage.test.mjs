@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadMod, find, texts } from "./harness.mjs";
+import { loadMod, find, texts, storage, ROOT } from "./harness.mjs";
 
 test("untried fallback candidates in r.order do not appear as stage pills", async () => {
   const m = await loadMod();
@@ -233,4 +233,84 @@ test("stage pills right-anchor on wide panels, hard-truncate without ellipses, c
   const doneTexts = texts(doneRow);
   assert.ok(doneTexts.some((s) => s.includes("99% cached")), "narrow request row preserves cache-hit stat");
   assert.ok(!doneTexts.some((s) => s.includes("\u2026") || s.includes("...")), "narrow request row hard-truncates without ellipses");
+});
+
+test("stage card adapts height to active row count cleanly", async () => {
+  const m = await loadMod();
+  const o = m.make({ loaded: true, offline: "", size: { width: 336, height: 600 } });
+
+  assert.equal(o.geometry().H, 52, "empty stage preserves 1-row minimum card height");
+
+  o.agents = [{ id: "codex", color: "#5e95d7" }, { id: "alma", color: "#849e4a" }, { id: "magpie", color: "#00a6b0" }];
+  o.accounts = [{ key: "codex", name: "Codex", model: "gpt-5.4" }];
+  assert.equal(o.geometry().H, 108, "3-row stage shrinks symmetrically instead of reserving 6 rows");
+
+  o.accounts = Array.from({ length: 6 }, (_, i) => ({ key: `k${i}`, name: `Acc${i}`, model: "m" }));
+  assert.equal(o.geometry().H, 192, "6-row stage accommodates all MAX_ACCOUNTS rows");
+});
+
+test("left-column agent pills render client icons, keep magpie untruncated on narrow panels, and fall back to a dot", async () => {
+  const m = await loadMod();
+  const o = m.make({ loaded: true, offline: "", size: { width: 251, height: 600 } });
+  o.agents = [
+    { id: "codex", color: "#5e95d7" },
+    { id: "alma", color: "#849e4a" },
+    { id: "magpie", color: "#00a6b0" },
+    { id: "custom-agent", color: "#d97757" },
+  ];
+  o.accounts = [{ key: "codex", name: "Codex", model: "gpt-5.4" }];
+  o.routes.set(1, {
+    id: 1,
+    agent: "codex",
+    model: "gpt-5.4",
+    done: false,
+    tries: [{ id: "codex", name: "Codex", done: false }],
+  });
+
+  const tree = o.render(m.cx);
+  assert.deepEqual(texts(find(tree, "agent-icon-codex")), ["mods/routing/icons/codex-color.png"]);
+  assert.deepEqual(texts(find(tree, "agent-icon-alma")), ["mods/routing/icons/alma-color.png"]);
+  assert.deepEqual(texts(find(tree, "agent-icon-magpie")), ["mods/routing/icons/magpie.svg"]);
+  assert.deepEqual(texts(find(tree, "agent-icon-custom-agent")), [], "unknown client falls back to dot without icon asset");
+  assert.ok(texts(find(tree, "agent-pill-magpie")).includes("magpie"), "magpie fits without truncation at W=251");
+});
+
+test("stage flow themes cycle and persist without polluting user prefs in demo mode", async () => {
+  const store = storage(new Map([["routing.stageStyle", "stream"]]));
+  const m = await loadMod({ home: ROOT, store });
+  const o = m.make({ loaded: true, offline: "", size: { width: 336, height: 600 } });
+  assert.equal(o.stageStyle, "stream");
+
+  o.agents = [{ id: "claude", color: "#d97757" }, { id: "codex", color: "#5e95d7" }];
+  o.accounts = [{ key: "anthropic", name: "Anthropic", model: "claude-sonnet-4" }];
+  o.routes.set(1, {
+    id: 1,
+    agent: "claude",
+    model: "claude-sonnet-4",
+    done: false,
+    tries: [{ id: "anthropic", name: "Anthropic", done: false }],
+  });
+
+  assert.equal(find(o.render(m.cx), "stage-style-toggle"), null, "toggle stays hidden when stage is not hovered");
+  o.stageHovered = true;
+  assert.deepEqual(texts(find(o.render(m.cx), "stage-style-toggle")), ["mods/routing/route.svg", "Stream"]);
+
+  o.cycleStageStyle(m.cx);
+  assert.equal(o.stageStyle, "minimal");
+  assert.equal(store.data.get("routing.stageStyle"), "minimal");
+  assert.deepEqual(texts(find(o.render(m.cx), "stage-style-toggle")), ["Minimal"]);
+  assert.notEqual(find(o.render(m.cx), "wire-core-claude-anthropic"), null);
+
+  o.cycleStageStyle(m.cx);
+  assert.equal(o.stageStyle, "magpie");
+  assert.equal(store.data.get("routing.stageStyle"), "magpie");
+  assert.deepEqual(texts(find(o.render(m.cx), "stage-style-toggle")), ["mods/routing/icons/magpie.svg", "Magpie"]);
+  assert.notEqual(find(o.render(m.cx), "wire-core-claude-anthropic"), null);
+
+  // Demo mode isolates storage preferences
+  const demoView = m.make({ demo: true });
+  await demoView.loadDemo(m.cx);
+  demoView.cycleStageStyle(m.cx);
+  assert.equal(demoView.stageStyle, "stream");
+  assert.equal(store.data.get("routing.stageStyle"), "magpie", "demo cycle never mutates persisted preference");
 });
