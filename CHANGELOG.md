@@ -9,6 +9,18 @@ together at one version.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-26
+
+### Added
+
+- Switchable routing flow themes (`Minimal` default, `Stream` optical beam, and `Magpie` flying bird), toggled via a hover button on the routing card or `"stageStyle"` in `config.json`, persisted in `localStorage`.
+- Client icons on left-column agent pills (including `alma`, with colored dot fallback for unknown agents).
+
+### Changed
+
+- Adaptive routing card height that fits the active row count (minimum 1 row) instead of reserving 6 rows.
+- Active-route spotlighting: active agent and account pills receive subtle tinted fills and colored borders while idle pills and wires softly dim.
+
 ## [0.3.5] - 2026-11-26
 
 ### Changed
@@ -91,6 +103,7 @@ together at one version.
 
 - Initial release of the `Magpie` Herdr layout with the Routing side panel (live routing topology, provider quota monitor, and inline request inspector) and `tabs-routing` tab bar.
 
+[0.4.0]: https://github.com/dorokuma/herdr-magpie/releases/tag/v0.4.0
 [0.3.5]: https://github.com/dorokuma/herdr-magpie/releases/tag/v0.3.5
 [0.3.4]: https://github.com/dorokuma/herdr-magpie/releases/tag/v0.3.4
 [0.3.3]: https://github.com/dorokuma/herdr-magpie/releases/tag/v0.3.3

@@ -239,14 +239,14 @@ test("stage card adapts height to active row count cleanly", async () => {
   const m = await loadMod();
   const o = m.make({ loaded: true, offline: "", size: { width: 336, height: 600 } });
 
-  assert.equal(o.geometry().H, 52, "empty stage preserves 1-row minimum card height");
+  assert.equal(o.geometry().H, 64, "empty stage preserves 1-row minimum card height with toggle clearance");
 
   o.agents = [{ id: "codex", color: "#5e95d7" }, { id: "alma", color: "#849e4a" }, { id: "magpie", color: "#00a6b0" }];
   o.accounts = [{ key: "codex", name: "Codex", model: "gpt-5.4" }];
-  assert.equal(o.geometry().H, 108, "3-row stage shrinks symmetrically instead of reserving 6 rows");
+  assert.equal(o.geometry().H, 120, "3-row stage shrinks symmetrically instead of reserving 6 rows");
 
   o.accounts = Array.from({ length: 6 }, (_, i) => ({ key: `k${i}`, name: `Acc${i}`, model: "m" }));
-  assert.equal(o.geometry().H, 192, "6-row stage accommodates all MAX_ACCOUNTS rows");
+  assert.equal(o.geometry().H, 204, "6-row stage accommodates all MAX_ACCOUNTS rows");
 });
 
 test("left-column agent pills render client icons, keep magpie untruncated on narrow panels, and fall back to a dot", async () => {
@@ -275,7 +275,11 @@ test("left-column agent pills render client icons, keep magpie untruncated on na
   assert.ok(texts(find(tree, "agent-pill-magpie")).includes("magpie"), "magpie fits without truncation at W=251");
 });
 
-test("stage flow themes cycle and persist without polluting user prefs in demo mode", async () => {
+test("stage flow themes default to minimal, cycle cleanly, and isolate demo mode", async () => {
+  const m0 = await loadMod({ home: ROOT, store: storage() });
+  const def = m0.make({ loaded: true, offline: "", size: { width: 336, height: 600 } });
+  assert.equal(def.stageStyle, "minimal", "default stage style is minimal");
+
   const store = storage(new Map([["routing.stageStyle", "stream"]]));
   const m = await loadMod({ home: ROOT, store });
   const o = m.make({ loaded: true, offline: "", size: { width: 336, height: 600 } });
@@ -296,15 +300,15 @@ test("stage flow themes cycle and persist without polluting user prefs in demo m
   assert.deepEqual(texts(find(o.render(m.cx), "stage-style-toggle")), ["mods/routing/route.svg", "Stream"]);
 
   o.cycleStageStyle(m.cx);
-  assert.equal(o.stageStyle, "minimal");
-  assert.equal(store.data.get("routing.stageStyle"), "minimal");
-  assert.deepEqual(texts(find(o.render(m.cx), "stage-style-toggle")), ["Minimal"]);
-  assert.notEqual(find(o.render(m.cx), "wire-core-claude-anthropic"), null);
-
-  o.cycleStageStyle(m.cx);
   assert.equal(o.stageStyle, "magpie");
   assert.equal(store.data.get("routing.stageStyle"), "magpie");
   assert.deepEqual(texts(find(o.render(m.cx), "stage-style-toggle")), ["mods/routing/icons/magpie.svg", "Magpie"]);
+  assert.notEqual(find(o.render(m.cx), "wire-core-claude-anthropic"), null);
+
+  o.cycleStageStyle(m.cx);
+  assert.equal(o.stageStyle, "minimal");
+  assert.equal(store.data.get("routing.stageStyle"), "minimal");
+  assert.deepEqual(texts(find(o.render(m.cx), "stage-style-toggle")), ["Minimal"]);
   assert.notEqual(find(o.render(m.cx), "wire-core-claude-anthropic"), null);
 
   // Demo mode isolates storage preferences
@@ -312,5 +316,5 @@ test("stage flow themes cycle and persist without polluting user prefs in demo m
   await demoView.loadDemo(m.cx);
   demoView.cycleStageStyle(m.cx);
   assert.equal(demoView.stageStyle, "stream");
-  assert.equal(store.data.get("routing.stageStyle"), "magpie", "demo cycle never mutates persisted preference");
+  assert.equal(store.data.get("routing.stageStyle"), "minimal", "demo cycle never mutates persisted preference");
 });

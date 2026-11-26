@@ -31,9 +31,17 @@ English · [简体中文](README.zh-CN.md)
 
 | | |
 | --- | --- |
-| **Smooth S-Curve Topology**<br>GPUI-native cubic Bézier wires, `40 ms` animation ticks, red error-shake flashes, and fixed seats that never jitter. | **Multi-Account Quotas**<br>87 bundled brand icons, green/gold/red remaining-% bars, folded `71% · 96%` short·long readings (or one icon-led pair per model family), every account listed and drag-to-reorder kept. |
+| **Adaptive Topology & Flow Themes**<br>Adaptive stage card height, client icons on agent pills, active-route spotlighting, and 3 switchable flow themes (`Minimal` default, `Stream`, `Magpie`). | **Multi-Account Quotas**<br>87 bundled brand icons, green/gold/red remaining-% bars, folded `71% · 96%` short·long readings (or one icon-led pair per model family), every account listed and drag-to-reorder kept. |
 | **Cache Hit & Smart `tok/s`**<br>One `Requests` header counts `active · recent`, `· 99% cached` prompt-cache rate, post-completion `tok/s` excluding TTFT (falling back to end-to-end on short tails), per-try HTTP status cards. | **Interactive Focus & Privacy**<br>Hover to spotlight connections, click to lock and filter the request feed, one-click `Masked` / `Shown` account privacy. |
 | **Space-Aware Herdr Layout**<br>First-class `Magpie` layout card in Settings → Look; `tabs-routing` remembers the sidebar per Space and fits the desktop titlebar. | **Zero-Dep & Self-Updating**<br>Pure ESM, no `node_modules`; in-panel one-click update with `sha256` verify; zero-network offline Demo mode. |
+
+## Switchable Flow Themes
+
+Hover over the routing stage card to reveal the bottom-right theme pill and switch animation styles live (saved in `localStorage`, or set `"stageStyle"` in `~/.config/herdr-app/mods/routing/config.json`):
+
+- **`Minimal` *(default)***: Clean breathing S-curves with zero extra frame-loop overhead.
+- **`Stream`**: Glowing optical-fiber beam gliding along active routes.
+- **`Magpie`**: Animated miniature magpies carrying packets along the curve.
 
 ## Quick Start
 

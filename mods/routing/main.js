@@ -26,10 +26,10 @@ const SEMVER = /^\d+\.\d+\.\d+$/;
 const FRAME = 40;          // ms between animation frames, only while flying
 const MAX_AGENTS = 4;      // the stage's four, as in magpie
 const MAX_ACCOUNTS = 6;
-const STAGE_STYLES = ["magpie", "stream", "minimal"];
-const STAGE_STYLE_LABELS = { magpie: "Magpie", stream: "Stream", minimal: "Minimal" };
+const STAGE_STYLES = ["minimal", "stream", "magpie"];
+const STAGE_STYLE_LABELS = { minimal: "Minimal", stream: "Stream", magpie: "Magpie" };
 
-const PAD = 12, ROW_H = 28, ROW_GAP = 8;
+const PAD = 18, ROW_H = 28, ROW_GAP = 8;
 
 const PALETTE = ["#d97757", "#bd8638", "#a59234", "#849e4a", "#5aa66c", "#25a98f",
   "#00a6b0", "#2e9fc9", "#5e95d7", "#858ad7", "#a47fca", "#bb77b1"];
@@ -187,7 +187,7 @@ export default class Routing extends View {
     this.updateBusy = false;
     this.updateError = "";
     this.loadUpdateState();
-    this.stageStyle = "magpie";
+    this.stageStyle = "minimal";
     this.stageHovered = false;
     this.loadStagePrefs();
     this.demo = false; // config.json's "demo": renders mods/routing/demo.json, asks no gateway
@@ -1041,7 +1041,7 @@ export default class Routing extends View {
     const AGENT_CHROME = 31;
     const agentNeed = (this.agents || []).reduce(
       (m, a) => Math.max(m, AGENT_CHROME + this.estTextW(a?.id, 11, true)), 56);
-    const agentMax = Math.min(104, Math.max(82, Math.round(W * 0.30)));
+    const agentMax = Math.min(104, Math.max(76, Math.round(W * 0.28)));
     const agentW = Math.max(56, Math.min(agentMax, agentNeed));
 
     const BORDER = 2, PAD_X = 8, DOT = 6, DOT_GAP = 6, COL_GAP = 10;
@@ -2499,8 +2499,8 @@ export default class Routing extends View {
             })
             .children(children))
           .when(this.stageHovered, el2 => el2.child(
-            h_flex().id("stage-style-toggle").absolute().right(6).bottom(5)
-              .px(6).py(2).gap(4).rounded(6).items_center().cursor_pointer()
+            h_flex().id("stage-style-toggle").absolute().right(6).bottom(3)
+              .px(6).py(1).gap(4).rounded(5).items_center().cursor_pointer()
               .bg(t.surface).border(1).border_color(t.border)
               .hover(s => s.bg(t.hover).border_color(t.selected))
               .tooltip(`Stage style: ${STAGE_STYLE_LABELS[this.stageStyle]} (click to switch)`)
