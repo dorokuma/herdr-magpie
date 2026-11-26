@@ -9,6 +9,12 @@ together at one version.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-26
+
+### Changed
+
+- Upgraded the `Stream` flow theme to a tapered optical-fiber beam with alpha-feathered tail, white-hot specular head, destination port arrival ring, and smoother 24ms frame pacing.
+
 ## [0.4.0] - 2026-11-26
 
 ### Added
@@ -103,6 +109,7 @@ together at one version.
 
 - Initial release of the `Magpie` Herdr layout with the Routing side panel (live routing topology, provider quota monitor, and inline request inspector) and `tabs-routing` tab bar.
 
+[0.4.1]: https://github.com/dorokuma/herdr-magpie/releases/tag/v0.4.1
 [0.4.0]: https://github.com/dorokuma/herdr-magpie/releases/tag/v0.4.0
 [0.3.5]: https://github.com/dorokuma/herdr-magpie/releases/tag/v0.3.5
 [0.3.4]: https://github.com/dorokuma/herdr-magpie/releases/tag/v0.3.4

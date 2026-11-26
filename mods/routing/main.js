@@ -23,7 +23,7 @@ const UPDATE_EVERY = 6 * 60 * 60 * 1000;   // the routine look, by the wall cloc
 const UPDATE_ASKED = 10 * 60 * 1000;       // the floor between looks a person causes
 const UPDATE_RETRY = [2, 10, 30, 60].map((m) => m * 60 * 1000); // after a failed look
 const SEMVER = /^\d+\.\d+\.\d+$/;
-const FRAME = 40;          // ms between animation frames, only while flying
+const FRAME = 24;          // ms between animation frames, only while flying
 const MAX_AGENTS = 4;      // the stage's four, as in magpie
 const MAX_ACCOUNTS = 6;
 const STAGE_STYLES = ["minimal", "stream", "magpie"];
@@ -2094,7 +2094,7 @@ export default class Routing extends View {
     };
 
     const sliceCurvePath = (poly, s0, s1, width) => {
-      if (!poly || s1 - s0 < 1.5) return null;
+      if (!poly || s1 - s0 < 0.6) return null;
       const p0 = this.pointAt(poly, s0);
       let pb = PathBuilder.stroke(width).move_to(p0.x, p0.y);
       const steps = Math.max(1, Math.ceil((s1 - s0) / 1.5));
@@ -2120,45 +2120,78 @@ export default class Routing extends View {
         if (this.stageStyle === "stream") {
           const glowPath = makeCurve(c, 3.5);
           children.push(div().id(`wire-glow-${w.agent}-${w.key}`).absolute().left(0).top(0).size_full()
-            .loop("opacity", { from: 0.06, to: 0.16, period: 1400 })
+            .loop("opacity", { from: 0.04, to: 0.10, period: 1600 })
             .child(window.paint_path(glowPath, color).absolute().left(0).top(0).size_full()));
 
           const corePath = makeCurve(c, 1.25);
           children.push(div().id(`wire-core-${w.agent}-${w.key}`).absolute().left(0).top(0).size_full()
-            .opacity(0.32)
-            .child(window.paint_path(corePath, color).absolute().left(0).top(0).size_full()));
+            .child(window.paint_path(corePath, rgba(color, 0.24)).absolute().left(0).top(0).size_full()));
 
           const poly = this.flat([c.seg]);
           if (poly && poly.L > 12) {
             const idx = activeIdx++;
-            const shuttleMs = 1800;
-            const u = ((animNow + idx * 900) % shuttleMs) / shuttleMs;
-            const goingLeft = u >= 0.5;
-            const p = easeIO(goingLeft ? (u - 0.5) * 2 : u * 2);
-            const headS = goingLeft ? (1 - p) * poly.L : p * poly.L;
-            const beamLen = Math.min(24, poly.L * 0.42);
-            const s0 = goingLeft ? headS : Math.max(0, headS - beamLen);
-            const s1 = goingLeft ? Math.min(poly.L, headS + beamLen) : headS;
-            const leadLen = (s1 - s0) * 0.65;
-            const l0 = goingLeft ? headS : Math.max(0, headS - leadLen);
-            const l1 = goingLeft ? Math.min(poly.L, headS + leadLen) : headS;
-            const op = Math.min(1, Math.sin(Math.PI * p) * 3.5);
-            if (op > 0.02) {
-              const outer = sliceCurvePath(poly, s0, s1, 3.6);
-              if (outer) {
-                children.push(window.paint_path(outer, color).absolute().left(0).top(0).size_full()
-                  .opacity(0.30 * op));
+            const period = 1600;
+            const tailLen = Math.min(56, poly.L * 0.55);
+            const pulses = poly.L > 95 ? [[0, 1.0], [0.5, 0.55]] : [[0, 1.0]];
+            let arrivalBloom = 0;
+
+            for (const [phaseOff, intensity] of pulses) {
+              const u = (((animNow + idx * 470) % period) / period + phaseOff) % 1;
+              const p = easeIO(u);
+              const headS = p * poly.L;
+              const tailStart = Math.max(0, headS - tailLen);
+              const env = Math.min(1, Math.sin(Math.PI * p) * 2.8);
+              const op = env * intensity;
+              if (p > 0.85) {
+                arrivalBloom = Math.max(arrivalBloom, ((p - 0.85) / 0.15) * intensity);
               }
-              const inner = sliceCurvePath(poly, l0, l1, 2.0);
-              if (inner) {
-                children.push(window.paint_path(inner, color).absolute().left(0).top(0).size_full()
-                  .opacity(0.95 * op));
+              if (op <= 0.02 || headS <= tailStart + 0.6) continue;
+
+              // Feathered 5-segment bloom along front 60% of tail
+              const span = headS - tailStart;
+              const bloomStart = tailStart + span * 0.40;
+              const bloomSpan = headS - bloomStart;
+              const bloomSegs = 5;
+              for (let k = 0; k < bloomSegs; k++) {
+                const seg0 = bloomStart + (bloomSpan * k) / bloomSegs;
+                const seg1 = bloomStart + (bloomSpan * (k + 1)) / bloomSegs;
+                const frac = (k + 1) / bloomSegs;
+                const bloomPath = sliceCurvePath(poly, seg0, seg1, 3.6);
+                if (bloomPath) {
+                  children.push(window.paint_path(bloomPath, rgba(color, Math.pow(frac, 2.0) * 0.22 * op))
+                    .absolute().left(0).top(0).size_full());
+                }
               }
+
+              // Silky 10-segment tapered comet core
+              const segs = 10;
+              for (let k = 0; k < segs; k++) {
+                const seg0 = tailStart + (span * k) / segs;
+                const seg1 = tailStart + (span * (k + 1)) / segs;
+                const frac = (k + 1) / segs;
+                const wSeg = 1.0 + 1.0 * frac;
+                const segPath = sliceCurvePath(poly, seg0, seg1, wSeg);
+                if (segPath) {
+                  children.push(window.paint_path(segPath, rgba(color, Math.pow(frac, 2.2) * 0.88 * op))
+                    .absolute().left(0).top(0).size_full());
+                }
+              }
+
+              // White-hot specular head
               const hp = this.pointAt(poly, headS);
-              children.push(div().absolute().left(hp.x - 3.5).top(hp.y - 3.5).size(7).rounded(3.5)
-                .bg(color).opacity(0.25 * op));
-              children.push(div().absolute().left(hp.x - 1.9).top(hp.y - 1.9).size(3.8).rounded(1.9)
-                .bg(color).opacity(op));
+              children.push(div().absolute().left(hp.x - 5).top(hp.y - 5).size(10).rounded(5)
+                .bg(rgba(color, 0.14 * op)));
+              children.push(div().absolute().left(hp.x - 2.5).top(hp.y - 2.5).size(5).rounded(2.5)
+                .bg(rgba(color, 0.48 * op)));
+              children.push(div().absolute().left(hp.x - 1.1).top(hp.y - 1.1).size(2.2).rounded(1.1)
+                .bg(rgba("#ffffff", 0.95 * op)));
+            }
+
+            if (arrivalBloom > 0.02) {
+              const rSize = 5 + arrivalBloom * 7;
+              const fade = 1 - arrivalBloom * 0.72;
+              children.push(div().absolute().left(c.x3 - rSize / 2).top(c.y3 - rSize / 2)
+                .size(rSize).rounded(rSize / 2).border(1).border_color(rgba(color, 0.55 * fade)));
             }
           }
         } else {
