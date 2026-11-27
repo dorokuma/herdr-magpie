@@ -9,6 +9,10 @@ together at one version.
 
 ## [Unreleased]
 
+### Documentation
+
+- Documented Windows (PowerShell) configuration for the remote Magpie gateway section in both READMEs: `hc machine ls` discovery note plus a single-line BOM-free UTF-8 write example for `%USERPROFILE%\.config\herdr-app\mods\routing\config.json`. Docs-only change, no release.
+
 ## [0.5.0] - 2026-11-27
 
 ### Added

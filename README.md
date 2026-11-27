@@ -154,7 +154,9 @@ Older installs without the update pill can run the two install lines above once.
 
 By default, `herdr-magpie` connects to `http://127.0.0.1:3425` on your local machine and reads `~/.config/magpie/providers.json` to discover your installed providers.
 
-If your Magpie gateway runs on a remote Herdr machine (via `herdr-core`), copy `config.example.json` to `config.json`:
+If your Magpie gateway runs on a remote Herdr machine (via `herdr-core`), first run `hc machine ls` to see the machine names registered in `herdr-core` (e.g. `my-remote-machine`). The panel then forwards gateway polling, quota queries, and `providers.json` discovery through `herdr-core` to run on that remote host — you do not need to expose port 3425.
+
+On macOS / Linux, copy `config.example.json` to `config.json`:
 
 ```bash
 cp ~/.config/herdr-app/mods/routing/config.example.json \
@@ -171,6 +173,16 @@ Edit `~/.config/herdr-app/mods/routing/config.json`:
   "demo": false
 }
 ```
+
+On Windows, the config file lives at `%USERPROFILE%\.config\herdr-app\mods\routing\config.json`. In PowerShell, write it as a single BOM-free UTF-8 line (PowerShell 5.1 `Set-Content -Encoding UTF8` writes a UTF-8 BOM that breaks JSON parsing, and multi-line Here-Strings are error-prone to paste):
+
+```powershell
+[IO.File]::WriteAllText("$env:USERPROFILE\.config\herdr-app\mods\routing\config.json", '{"remote":"my-remote-machine","label":"my-remote-machine · 127.0.0.1:3425","baseUrl":"http://127.0.0.1:3425","demo":false}', (New-Object Text.UTF8Encoding $false))
+```
+
+Note: the path `%USERPROFILE%\.config\herdr-app\mods\routing\config.json` applies only to the default install directory. If you have set `HERDR_APP_HOME` or `XDG_CONFIG_HOME` (see the path-priority rules in the Install section above), write to `mods\routing\config.json` under the corresponding install directory instead.
+
+Note: `WriteAllText` replaces the entire `config.json` — use it only when creating a new configuration or intentionally overwriting the whole file. If the file already contains other fields such as `stageStyle`, edit the original file directly so your existing settings are preserved.
 
 </details>
 
