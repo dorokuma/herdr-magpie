@@ -9,6 +9,20 @@ together at one version.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-27
+
+### Added
+
+- Native Windows PowerShell installer `install.ps1`, aligned with the `herdr-app` path priority: uses `-LiteralPath` throughout, skips the source-side `config.json` overwrite, verifies installation through the `herdr-app check` exit code, and stays compatible with both PowerShell 5.1 and 7 Legacy JSON argument passing.
+- Windows cross-platform runtime support in `mods/routing/main.js`: `latestRelease()` pipes to `-o NUL`, and the self-update path uses PowerShell with `System32\curl.exe`/`tar.exe`, `Get-FileHash` verification, UTF-8 Base64 path argument passing, and atomic replacement via `[IO.File]::Replace(..., NullString::Value)`.
+- One-command install instructions for all platforms in the English and Chinese `README.md` / `README.zh-CN.md` (Unix sub-shell and Windows child scope), plus configuration directory documentation.
+
+### Changed
+
+- Hardened the Linux / macOS `install.sh`: `XDG_CONFIG_HOME` priority, empty or root `HOME` guards, a WSL hint, `herdr-app` fallback probing, and `config.json` protection.
+- Aligned `discoverProviders()` in `mods/routing/main.js` across all three platforms with Magpie's `XDG_CONFIG_HOME` resolution rules.
+- Updated `scripts/release-check.sh` and the cross-platform unit test coverage for the new install and update paths.
+
 ## [0.4.1] - 2026-11-26
 
 ### Changed
