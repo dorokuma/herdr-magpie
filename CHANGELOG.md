@@ -9,9 +9,22 @@ together at one version.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-27
+
+### Added
+
+- Redesigned two-line request rows in the routing stage (PR #2, by @KOP-XIAO): the first line carries the route badge and timestamp, and the second line shows the live stage with elapsed time and metrics as they progress.
+- Live stage progress in request rows: `fmtElapsed` removes sub-second jitter from the elapsed-time display, and the `Minimal` stage style skips repaints for intermediate in-flight frames.
+
+### Changed
+
+- Unified agent / provider / account display label casing (PR #2, by @KOP-XIAO), while preserving internal IDs and prototype-key safety.
+- Compact stage right-side chips keep the model name untruncated (PR #2, by @KOP-XIAO).
+- Follow-up polish: calibrated the fixed chrome budget of narrow-width badges to 2px, split the two-line subtree assertions, and pinned the frame test clock for stable stage tests.
+
 ### Documentation
 
-- Documented Windows (PowerShell) configuration for the remote Magpie gateway section in both READMEs: `hc machine ls` discovery note plus a single-line BOM-free UTF-8 write example for `%USERPROFILE%\.config\herdr-app\mods\routing\config.json`. Docs-only change, no release.
+- Documented Windows (PowerShell) configuration for the remote Magpie gateway section in both READMEs: `hc machine ls` discovery note plus a single-line BOM-free UTF-8 write example for `%USERPROFILE%\.config\herdr-app\mods\routing\config.json`.
 
 ## [0.5.0] - 2026-11-27
 
