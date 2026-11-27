@@ -12,14 +12,20 @@
 # Restricted execution policy that irm | iex works around. The whole body
 # sits in one script block so a failure throws without ever calling `exit`:
 # inside irm | iex a bare exit would close the person's PowerShell window.
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
+# Strict mode, the error preference and every variable stay inside that
+# block too: above it nothing but comments and #requires stands, so piped
+# into an interactive PowerShell session the script leaves the person's own
+# session exactly as it found it, whether it succeeds or throws.
 
-# resolved before the wrapper: inside the script block $PSScriptRoot is read
-# through this copy, so the local-mode probe answers the same either way
-$InstallerScriptRoot = $PSScriptRoot
+# $PSScriptRoot -- the script's own folder, empty inside the block -- is
+# handed in as a parameter, so the local-mode probe answers the same either
+# way the script is started.
+& { param($InstallerScriptRoot)
+  # Inside the block, never at the caller's scope: strict mode and the error
+  # preference rule this install only.
+  Set-StrictMode -Version Latest
+  $ErrorActionPreference = 'Stop'
 
-& {
   # Where herdr-app looks for mods, in the order its own src/mods.rs resolves it:
   #   1. a non-empty HERDR_APP_HOME
   #   2. a non-empty XDG_CONFIG_HOME -> <XDG_CONFIG_HOME>\herdr-app
@@ -185,4 +191,4 @@ $InstallerScriptRoot = $PSScriptRoot
   # shell itself.
   $global:LASTEXITCODE = 0
   return
-}
+} $PSScriptRoot

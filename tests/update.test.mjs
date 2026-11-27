@@ -379,20 +379,28 @@ if [ -f "$src" ]; then cp "$src" "$out"; exit 0; fi
 echo "curl: (22) not found: $url" >&2
 exit 22
 `, { mode: 0o755 });
-  return `${bin}${path.delimiter}${process.env.PATH}`;
+  // the bare stub folder, NOT pre-joined to the real PATH: the caller puts
+  // every stub ahead of the real PATH exactly once. Joining it here would
+  // sandwich the real PATH in front of the herdr-app stub -- and on a
+  // machine with a real herdr-app installed the install would then drive
+  // THAT instead of the stub.
+  return bin;
 }
 
 // the installer as a person pipes it: bash reads the script from stdin. The
 // checkout's install.sh is the script under test; the archive it downloads
 // is the packed tree in `dir`, found through HERDR_MAGPIE_RELEASE_BASE.
-function pipedInstall(dir, { home, version, env = {} } = {}) {
+// `before` is prepended to the PATH ahead of even the curl stub: a test that
+// wants its own stand-in for a tool (a tar that must never run, say) hands
+// its folder in here.
+function pipedInstall(dir, { home, version, env = {}, before = "" } = {}) {
   const stub = stubHerdrApp();
   const r = spawnSync("bash", [], {
     input: fs.readFileSync(path.join(ROOT, "install.sh"), "utf8"),
     encoding: "utf8",
     env: {
       ...process.env,
-      PATH: `${stubCurl()}${path.delimiter}${stub.PATH}`,
+      PATH: `${before ? `${before}${path.delimiter}` : ""}${stubCurl()}${path.delimiter}${stub.PATH}`,
       HERDR_APP_HOME: home,
       HERDR_MAGPIE_RELEASE_BASE: `${pathToFileURL(dir).href}`,
       STUB_VERSION: version,
@@ -432,12 +440,21 @@ test("install.sh, piped into bash, refuses an archive that fails its sha256 and 
   for (const f of fs.readdirSync(goodDir)) fs.copyFileSync(path.join(goodDir, f), path.join(dir, f));
   fs.writeFileSync(path.join(dir, `herdr-magpie-${V}.tar.gz.sha256`), `${"0".repeat(64)}  herdr-magpie-${V}.tar.gz\n`);
 
+  // a tar stand-in that records every invocation sits ahead of everything
+  // on PATH: unpacking before the checksum passes is the regression this
+  // test exists for, and it would be invisible without it -- a wrong order
+  // still produces the same refusal, just having read the untrusted bytes.
+  const tarBin = tmpdir("tarbin");
+  const tarLog = path.join(tarBin, "calls.log");
+  fs.writeFileSync(path.join(tarBin, "tar"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${tarLog}'\nexit 0\n`, { mode: 0o755 });
+
   const home = tmpdir("home");
-  const r = pipedInstall(dir, { home, version: V });
+  const r = pipedInstall(dir, { home, version: V, before: tarBin });
   assert.notEqual(r.status, 0, "the checksum mismatch is fatal");
   assert.match(r.stderr, /checksum mismatch/, "the refusal says why");
   assert.ok(!r.stdout.includes("Installed herdr-magpie"), "the install did not complete");
   assert.deepEqual(fs.readdirSync(home), [], "nothing was written into HERDR_APP_HOME: the checksum gates the install");
+  assert.ok(!fs.existsSync(tarLog), "tar was never even invoked: an archive that fails verification is never unpacked");
 });
 
 // --- Windows: the platform the panel runs on -----------------------------------
@@ -608,14 +625,23 @@ test("install.ps1, the Windows installer, never poisons a successful install's e
   // that resets the leftover exit code and returns instead: no line of the
   // script may call exit at all
   assert.ok(!/^\s*exit\b/m.test(ps1), "no bare exit anywhere: inside irm | iex it would close the host PowerShell window");
-  assert.ok(/^& \{/m.test(ps1), "the body is a single script block, so a throw inside iex stays in iex");
-  assert.ok(/Write-Output "Installed herdr-magpie into \$HerdrHome"[\s\S]*\$global:LASTEXITCODE = 0\s*\n\s*return\s*\n\}\s*$/.test(ps1),
-    "the script ends by resetting the leftover native exit code and returning, not by exiting");
+  assert.ok(/^& \{ param\(\$InstallerScriptRoot\)\s*$/m.test(ps1),
+    "the body is a single script block taking the script root as a parameter, so a throw inside iex stays in iex");
+  assert.ok(/Write-Output "Installed herdr-magpie into \$HerdrHome"[\s\S]*\$global:LASTEXITCODE = 0\s*\n\s*return\s*\n\}\s*\$PSScriptRoot\s*$/.test(ps1),
+    "the script ends by resetting the leftover native exit code and returning, not by exiting; \$PSScriptRoot is passed into the block");
+  // nothing but comments and #requires may stand outside the block: piped
+  // into a person's interactive PowerShell session, a strict mode, an error
+  // preference or a variable set at file scope would stay behind in that
+  // session after the script ends or throws
+  const outside = ps1.slice(0, ps1.indexOf("& { param($InstallerScriptRoot)"));
+  assert.ok(!/^\s*Set-StrictMode\b/m.test(outside), "no Set-StrictMode outside the block: it would poison the caller's session");
+  assert.ok(!/^\s*\$ErrorActionPreference\s*=/m.test(outside), "no $ErrorActionPreference assignment outside the block");
+  assert.ok(!/^\s*\$InstallerScriptRoot\s*=/m.test(outside), "no $InstallerScriptRoot variable outside the block: it is a parameter");
   // the dual-mode bootstrap: beside a tree it installs what it sits in
   // ($InstallerScriptRoot, captured from $PSScriptRoot before the wrapper);
   // piped into iex it downloads the release itself, verifies it and unpacks
   // it with the System32 curl.exe and tar.exe the updater also uses
-  assert.ok(ps1.includes("$InstallerScriptRoot = $PSScriptRoot"), "the script's own folder is captured before the wrapper");
+  assert.ok(/\}\s*\$PSScriptRoot\s*$/.test(ps1), "\$PSScriptRoot is captured by the invocation, outside the block where it is still set");
   assert.ok(ps1.includes("Join-Path $InstallerScriptRoot 'mods\\routing'"), "local mode probes the tree beside the script");
   assert.ok(ps1.includes("$env:HERDR_MAGPIE_RELEASE_BASE"), "the release server can be overridden");
   assert.ok(ps1.includes("$env:HERDR_MAGPIE_VERSION"), "the version can be pinned");

@@ -13,6 +13,19 @@ import { loadMod, realExec, oldInstall, releasedMods, stubHerdrApp, tmpdir, ROOT
 
 const V = process.env.HM_PUBLISHED || "";
 const skip = V ? false : "set HM_PUBLISHED=X.Y.Z (scripts/release-check.sh --published does)";
+
+// The child processes this file spawns run real downloads from the network.
+// They get an environment with the common credential variables stripped out:
+// a token handed to a subprocess (and to every server its downloads touch)
+// is a token leaked. Everything needed to reach GitHub -- PATH, HOME,
+// proxies, certificate authorities -- stays.
+function cleanEnv(extra = {}) {
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) {
+    if (/(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTH)$/.test(k) || /^CI_/.test(k)) delete env[k];
+  }
+  return Object.assign(env, extra);
+}
 const num = (v) => v.split(".").map(Number);
 const older = (a, b) => { const x = num(a), y = num(b); return (x[0] - y[0] || x[1] - y[1] || x[2] - y[2]) < 0; };
 const released = V ? spawnSync("git", ["-C", ROOT, "show", `v${V}:mods/routing/main.js`], { encoding: "utf8", maxBuffer: 64 << 20 }) : null;
@@ -25,7 +38,11 @@ test(`the pill takes the previous release to ${V}, over the network`, { skip }, 
 
   const home = tmpdir("home");
   const r = oldInstall(home, prev.version);
-  const m = await loadMod({ source: prev.source, home, exec: realExec });
+  // the updater runs real downloads: hand it the same credential-scrubbed
+  // environment the one-line install test uses
+  const stripped = cleanEnv();
+  const exec = (cmd, args = [], opts = {}) => realExec(cmd, args, { ...opts, env: stripped });
+  const m = await loadMod({ source: prev.source, home, exec });
   const o = m.make({ configReady: true });
   await o.readModVersion();
   o.announceVersion();
@@ -64,7 +81,10 @@ test(`the README's no-clone install lines install ${V}`, { skip }, () => {
   // temporary folder the bootstrap downloads into, however it ends
   let r;
   for (let i = 0; i < 3; i++) {
-    r = spawnSync("bash", ["-c", en[0]], { encoding: "utf8", env: { ...process.env, PATH: stub.PATH, HERDR_APP_HOME: home } });
+    // pipefail: the README line is a pipe (curl | bash), and without it a
+    // curl that dies before writing a byte would be swallowed into exit 0
+    // by an empty bash, passing a test that installed nothing
+    r = spawnSync("bash", ["-c", `set -o pipefail;\n${en[0]}`], { encoding: "utf8", env: cleanEnv({ PATH: stub.PATH, HERDR_APP_HOME: home }) });
     if (r.status === 0) break;
   }
   assert.equal(r.status, 0, r.stderr);
@@ -86,4 +106,22 @@ test("the READMEs' PowerShell install block is one and the same in both language
   assert.equal(zh.length, 1, "README.zh-CN.md has one PowerShell install block");
   assert.deepEqual(zh, en, "README.zh-CN.md gives the same lines, byte for byte");
   assert.ok(!/herdr-magpie-\d+\.\d+\.\d+/.test(en[0]), "no version is pinned into the block");
+});
+
+// The Windows one-liner cannot be executed here (no PowerShell on the
+// machines this suite targets), but its first hop can: the tiny redirect
+// script behind dorokuma.github.io/hm.ps1 must answer 200 and point at the
+// install.ps1 asset of releases/latest, or every Windows install line is
+// dead no matter how good the release is.
+test("https://dorokuma.github.io/hm.ps1 answers 200 and hands off to the install.ps1 asset", { skip }, () => {
+  let r;
+  for (let i = 0; i < 3; i++) {
+    r = spawnSync("curl", ["-sSL", "--max-time", "30", "-w", "\n%{http_code}", "https://dorokuma.github.io/hm.ps1"], { encoding: "utf8", env: cleanEnv() });
+    if (r.status === 0) break;
+  }
+  assert.equal(r.status, 0, `curl reached hm.ps1: ${r.stderr}`);
+  assert.ok(r.stdout.endsWith("\n200"), `hm.ps1 answers HTTP 200, got the tail ${JSON.stringify(r.stdout.slice(-40))}`);
+  const body = r.stdout.slice(0, -4);
+  assert.ok(body.includes("releases/latest/download/install.ps1"), "the redirect script hands off to the install.ps1 asset of releases/latest");
+  assert.ok(!/herdr-magpie-\d+\.\d+\.\d+/.test(body), "no version is pinned into the redirect script");
 });
