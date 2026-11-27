@@ -113,6 +113,22 @@ if [ "$MODE" = published ]; then
   U="https://github.com/$REPO/releases/download/v$V/$A"
   if retry curl -fsSL --max-time 120 -o "$WORK/$A" "$U" 2>/dev/null && retry curl -fsSL --max-time 30 -o "$WORK/$A.sha256" "$U.sha256" 2>/dev/null; then
     ok "the release carries $A and $A.sha256"
+    # the one-line installers are release assets of their own: without them
+    # curl -fsSL https://dorokuma.github.io/hm | bash has nothing to fetch.
+    # The comparison reads the tagged commit's blob, never HEAD: the tag is
+    # what was published, and HEAD may have moved since (or never have been
+    # the release commit at all).
+    for I in install.sh install.ps1; do
+      if retry curl -fsSL --max-time 30 -o "$WORK/dl-$I" "https://github.com/$REPO/releases/download/v$V/$I" 2>/dev/null; then
+        if git cat-file -p "${TAGC}:$I" > "$WORK/tagged-$I" 2>/dev/null && cmp -s "$WORK/dl-$I" "$WORK/tagged-$I"; then
+          ok "the release carries $I, byte for byte the one tagged v$V"
+        else
+          bad "the release carries $I, byte for byte the one tagged v$V" "the published asset differs from what the tagged commit carries"
+        fi
+      else
+        bad "the release carries $I, byte for byte the one tagged v$V" "could not download https://github.com/$REPO/releases/download/v$V/$I" "without it, the one-line installer has nothing to fetch"
+      fi
+    done
     WANT=$(cut -d' ' -f1 < "$WORK/$A.sha256")
     if [ -n "$WANT" ] && [ "$WANT" = "$(sha "$WORK/$A")" ]; then ok "the archive matches its .sha256"; else bad "the archive matches its .sha256" "published $WANT" "actual    $(sha "$WORK/$A")"; fi
     mkdir -p "$WORK/got" "$WORK/want"
@@ -126,7 +142,12 @@ if [ "$MODE" = published ]; then
   fi
 
   section "A real update, over the network"
-  if HM_PUBLISHED="$V" node --test --test-reporter=spec tests/live/published.test.mjs >"$WORK/live" 2>&1; then
+  if [ "$fail" -gt 0 ]; then
+    # never execute the remote install lines against assets that failed a
+    # check above: an untrusted tarball or installer must not be run, not
+    # even by the gate itself
+    skipped "tests/live/published.test.mjs: assets failed verification above; the remote install lines are not executed against untrusted assets"
+  elif HM_PUBLISHED="$V" node --test --test-reporter=spec tests/live/published.test.mjs >"$WORK/live" 2>&1; then
     grep -E '^✔' "$WORK/live" | sed 's/^✔ /  ok    /; s/ ([0-9.]*ms)$//'
     pass=$((pass + $(grep -cE '^✔' "$WORK/live")))
   else
@@ -233,8 +254,35 @@ else
 fi
 
 if [ -n "$OUT" ] && [ "$fail" -eq 0 ]; then
-  mkdir -p "$OUT" && cp "$WORK/$A" "$WORK/$A.sha256" "$OUT/"
-  printf '\nLeft in %s:\n  %s\n  %s\n' "$OUT" "$A" "$A.sha256"
+  # every step of the export is checked on its own: a failed write must
+  # never end up behind a READY verdict. install.sh and install.ps1 are
+  # read out of the HEAD commit, not the working tree, so a dirty or
+  # newline-mangled working file cannot slip into the upload set.
+  EXPORTED=yes
+  if ! mkdir -p "$OUT" 2>"$WORK/out-err"; then
+    bad "the export folder $OUT can be created" "$(head -2 "$WORK/out-err")"
+    EXPORTED=no
+  fi
+  if [ "$EXPORTED" = yes ]; then
+    for I in "$WORK/$A" "$WORK/$A.sha256"; do
+      if ! cp "$I" "$OUT/" 2>"$WORK/out-err"; then
+        bad "$(basename "$I") is exported to $OUT" "$(head -2 "$WORK/out-err")"
+        EXPORTED=no
+      fi
+    done
+  fi
+  if [ "$EXPORTED" = yes ]; then
+    for I in install.sh install.ps1; do
+      if ! git show "HEAD:$I" > "$OUT/$I" 2>"$WORK/out-err"; then
+        bad "$I is exported to $OUT from the HEAD commit" "$(head -2 "$WORK/out-err")"
+        EXPORTED=no
+      fi
+    done
+    chmod +x "$OUT/install.sh" 2>/dev/null || true
+  fi
+  if [ "$EXPORTED" = yes ]; then
+    printf '\nLeft in %s:\n  %s\n  %s\n  %s\n  %s\n' "$OUT" "$A" "$A.sha256" install.sh install.ps1
+  fi
 fi
 
 case "$STATE" in

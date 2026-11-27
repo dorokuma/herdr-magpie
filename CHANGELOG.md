@@ -9,6 +9,20 @@ together at one version.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-27
+
+### Added
+
+- One-line install: `curl -fsSL https://dorokuma.github.io/hm | bash` on macOS / Linux and `irm https://dorokuma.github.io/hm.ps1 | iex` on Windows. Both installers are now dual-mode: run from a clone or an unpacked release they install the tree they sit in; piped into a shell they bootstrap themselves by downloading the release archive, verifying its SHA-256 against the published `.sha256` before anything is unpacked or the install directory is touched. `HERDR_MAGPIE_RELEASE_BASE` and `HERDR_MAGPIE_VERSION` override the release server and the version.
+
+### Changed
+
+- `install.sh` resolves the latest release and downloads the archive itself in remote mode (3 retries), verifies the checksum with `sha256sum` / `shasum -a 256`, and aborts before unpacking on any mismatch; the piped-into-bash invocation no longer fails on an unset `BASH_SOURCE`.
+- `install.ps1` downloads with `System32\curl.exe` and unpacks with `System32\tar.exe` in remote mode, verifies the archive with `Get-FileHash -Algorithm SHA256`, and performs the install in the same script instead of launching a downloaded `.ps1`, so it runs unblocked under the default `Restricted` execution policy via `irm | iex`. The script body no longer ends in a bare `exit`, which would have closed the host PowerShell window inside `iex`.
+- `scripts/release-check.sh` now ships `install.sh` and `install.ps1` as release assets (`--out` exports them from the `HEAD` commit) and verifies the published ones byte for byte against the tagged commit (`TAGC`, `--published`).
+- The Quick Start sections of both READMEs use the one-line installers; the PowerShell execution-policy hint is gone because `irm | iex` needs none.
+- Lightened the `Stream` flow theme to reduce per-frame sampling and drawing work, keeping fast animations clear of the single-frame render budget: curve `Path`s and flattened polylines are cached per wire instead of being rebuilt every frame, beam slices are sampled at a 4.5px step instead of 1.5px, the outer bloom drops from 5 segments to 2 and is drawn for the primary pulse only, the comet core tapers in 5 segments for the primary pulse and 4 for the secondary (down from 10), the secondary half-phase pulse now fires only on long wires while at most 3 wires are active and no longer draws its outermost 10px head halo, and text width measurement is memoized with `charCodeAt`-based exact character checks replacing per-character regexes. `rgba` alpha is clamped into `[0, 1]` so non-finite or out-of-range values can never produce an invalid hex color. The calibrated width table itself is unchanged.
+
 ## [0.6.0] - 2026-11-27
 
 ### Added

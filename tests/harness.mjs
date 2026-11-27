@@ -33,8 +33,8 @@ export function tmpdir(tag = "t") {
 // Every builder call returns another recorder, so any chain the mod writes
 // (div().flex().child(...).when(cond, (el) => ...)) runs to the end. What a
 // node was given as children is kept, which is what texts() reads back.
-function recorder(label) {
-  const node = { label, id: null, kids: [] };
+function recorder(label, seed) {
+  const node = { label, id: null, kids: [], ...seed };
   const fn = function () {};
   const p = new Proxy(fn, {
     get(_t, k) {
@@ -58,10 +58,52 @@ function recorder(label) {
   return p;
 }
 
-function fresh(label, args) {
-  const r = recorder(label);
+function fresh(label, args, seed) {
+  const r = recorder(label, seed);
   for (const x of args || []) if (typeof x === "string") r.__node.kids.push(x);
   return r;
+}
+
+// A PathBuilder that writes down what it was asked to draw: the stroke width
+// and every move/line/bezier segment's coordinates, so a test can assert the
+// geometry of what a frame painted — and how many builders a frame spent.
+function pathBuilderFactory(paths) {
+  return new Proxy(function () {}, {
+    get(_t, k) {
+      if (k === Symbol.toPrimitive) return () => "[PathBuilder]";
+      if (typeof k === "symbol") return undefined;
+      if (k === "stroke") {
+        return (width) => {
+          const rec = { width, ops: [] };
+          paths.push(rec);
+          const builder = new Proxy(function () {}, {
+            get(_t2, k2) {
+              if (typeof k2 === "symbol") return undefined;
+              if (["move_to", "line_to", "cubic_bezier_to"].includes(k2)) {
+                return (...coords) => { rec.ops.push([k2, ...coords]); return builder; };
+              }
+              if (k2 === "build") return () => ({ __path: rec });
+              return () => builder; // style methods draw no geometry
+            },
+          });
+          return builder;
+        };
+      }
+      return () => pathBuilderFactory(paths); // never reached by the mod today
+    },
+  });
+}
+
+// Every (path, color) a frame painted, in order, with the path's recorded
+// geometry attached. window.paint_path is the only constructor the mod calls
+// on gpui-shell's window.
+function paintPathRecorder() {
+  return (path, color) => {
+    const r = recorder("paint_path");
+    r.__node.paintPath = path;
+    r.__node.paintColor = color;
+    return r;
+  };
 }
 
 // Every string a rendered tree would show, in drawing order.
@@ -98,13 +140,13 @@ export function find(tree, id) {
 
 const palette = new Proxy({}, { get: (_t, k) => (typeof k === "symbol" ? undefined : "#808080") });
 
-function hostModules(env) {
+function hostModules(env, paths) {
   class View {}
   const ui = (extra) => new Proxy(extra, {
     get: (t, k) => (k in t ? t[k] : typeof k === "symbol" ? undefined : recorder(String(k))),
   });
   return {
-    "gpui-kit": ui({ View }),
+    "gpui-kit": ui({ View, PathBuilder: pathBuilderFactory(paths) }),
     "gpui-base": ui({}),
     herdr: {
       theme: () => palette,
@@ -133,7 +175,7 @@ export function realExec(cmd, args = [], opts = {}) {
   return Promise.resolve({ code: r.status ?? 1, stdout: r.stdout || "", stderr: r.stderr || String(r.error || "") });
 }
 
-// loadMod({ source?, home?, exec?, store?, window? }) -> { Routing, env, notes, store, cx, make }
+// loadMod({ source?, home?, exec?, store?, window? }) -> { Routing, env, notes, store, cx, make, paths }
 //   source  the text of a main.js; default: this checkout's. A released one
 //           comes from `git show vX.Y.Z:mods/routing/main.js`.
 //   home    what appHome() answers: the folder holding mods/ and layouts/.
@@ -152,7 +194,31 @@ export async function loadMod({ source, home, exec, store, window: windowFn } = 
   };
   const st = store ?? storage();
   const id = `m${++seq}`;
-  (globalThis.__herdrMagpie ??= {})[id] = { mods: hostModules(env), localStorage: st, window: recorder("window") };
+  // pathBuilds: one entry per PathBuilder.stroke(width) the mod starts,
+  // recording the width and the move/line/bezier geometry — what a frame
+  // spent on building curves. window.paint_path keeps its own recording on
+  // each rendered node (paintPath/paintColor).
+  const pathBuilds = [];
+  const windowStandIn = recorder("window");
+  const windowProxy = new Proxy(function () {}, {
+    get(_t, k) {
+      if (k === "__node") return windowStandIn.__node;
+      if (k === "then") return undefined;
+      if (k === Symbol.toPrimitive) return () => "[window]";
+      if (typeof k === "symbol") return undefined;
+      if (k === "paint_path") return paintPathRecorder();
+      const inner = windowStandIn;
+      if (k === "id") return (v) => { inner.__node.id = String(v); return windowProxy; };
+      if (k === "child") return (c) => { inner.__node.kids.push(c); return windowProxy; };
+      if (k === "children") return (cs) => { for (const c of cs || []) inner.__node.kids.push(c); return windowProxy; };
+      if (k === "when") return (cond, f) => { if (cond && typeof f === "function") f(windowProxy); return windowProxy; };
+      if (k === "when_some") return (v, f) => { if (v != null && typeof f === "function") f(windowProxy, v); return windowProxy; };
+      return () => windowProxy;
+    },
+    apply(_t, _this, args) { return fresh("window", args); },
+    construct(_t, args) { return fresh("window", args); },
+  });
+  (globalThis.__herdrMagpie ??= {})[id] = { mods: hostModules(env, pathBuilds), localStorage: st, window: windowProxy };
 
   const swapped = [];
   let body = src.replace(IMPORT, (_all, names, from) => {
@@ -193,7 +259,7 @@ export async function loadMod({ source, home, exec, store, window: windowFn } = 
     o.init({}, cx);
     return Object.assign(o, over);
   };
-  return { Routing, env, notes, store: st, cx, make };
+  return { Routing, env, notes, store: st, cx, make, paths: pathBuilds };
 }
 
 // --- a release on disk -------------------------------------------------------

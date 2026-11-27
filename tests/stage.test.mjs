@@ -3,7 +3,23 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadMod, find, texts, storage, ROOT } from "./harness.mjs";
+import fs from "node:fs";
+import { loadMod, find, texts, storage, ROOT, MAIN } from "./harness.mjs";
+
+// Total recorder nodes in a rendered tree: what one frame costs to build.
+function nodeCount(tree) {
+  const seen = new Set();
+  const walk = (v) => {
+    if (v == null) return 0;
+    if (Array.isArray(v)) return v.reduce((s, x) => s + walk(x), 0);
+    if (typeof v !== "object" && typeof v !== "function") return 0;
+    const n = v.__node;
+    if (!n || seen.has(n)) return 0;
+    seen.add(n);
+    return 1 + n.kids.reduce((s, x) => s + walk(x), 0);
+  };
+  return walk(tree);
+}
 
 test("untried fallback candidates in r.order do not appear as stage pills", async () => {
   const m = await loadMod();
@@ -569,6 +585,281 @@ test("two-line request rows render route badge on line 1, live telemetry phases 
         (hasBadge ? o.estTextW(l1[badgeIdx], 9.5, false) : 0);
       assert.ok(line1Used <= rowInnerW, `row ${id} line 1 width (${line1Used}px) fits within container (${rowInnerW}px) so timestamp is never clipped`);
     }
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("rgba clamps non-finite and out-of-range alpha into a valid two-digit hex channel", async () => {
+  // rgba() is a module-local function, so it is exercised through the exact
+  // source slice the mod itself ships (the same lines the harness loads).
+  const src = fs.readFileSync(MAIN, "utf8");
+  const start = src.indexOf("const rgba = ");
+  const end = src.indexOf("};", start) + 2;
+  assert.ok(start >= 0 && end > start, "main.js still defines rgba");
+  const rgba = new Function(`${src.slice(start, end)}; return rgba;`)();
+
+  for (const a of [NaN, Infinity, -Infinity]) {
+    assert.equal(rgba("#d97757", a), "#d9775700", `non-finite alpha ${a} clamps to 00`);
+  }
+  assert.equal(rgba("#d97757", -0.4), "#d9775700", "alpha below 0 clamps to 00");
+  assert.equal(rgba("#d97757", 2.5), "#d97757ff", "alpha above 1 clamps to ff");
+  assert.equal(rgba("#d97757", 0), "#d9775700");
+  assert.equal(rgba("#d97757", 1), "#d97757ff");
+  assert.equal(rgba("#d97757", 0.5), "#d9775780", "in-range alpha keeps the old rounding");
+  for (const a of [0.14, 0.24, 0.48, 0.88, 0.95]) {
+    assert.match(rgba("#00a6b0", a), /^#00a6b0[0-9a-f]{2}$/, "every output stays an 8-digit hex color");
+  }
+});
+
+test("estTextW memoizes while matching the pre-optimization widths exactly, fitText truncates identically", async () => {
+  const m = await loadMod();
+  const o = m.make({ loaded: true, offline: "" });
+
+  // The per-codepoint semantic the regex loop had before the charCodeAt
+  // rewrite: same calibration coefficients, code points counted once.
+  const refEstW = (s, px, bold = false) => {
+    let w = 0;
+    for (const ch of String(s || "")) {
+      const c = ch.charCodeAt(0);
+      if (c > 255) w += px * 1.00;
+      else if (/[mw]/.test(ch)) w += px * 0.80;
+      else if (/[MWGOQD]/.test(ch)) w += px * 0.78;
+      else if (/[A-Z]/.test(ch)) w += px * 0.67;
+      else if (/[0-9]/.test(ch)) w += px * 0.56;
+      else if (ch === "-") w += px * 0.38;
+      else if (/[iIl.,:;|!()[\] tfrj]/.test(ch)) w += px * 0.33;
+      else if (ch === "%") w += px * 0.78;
+      else w += px * 0.53;
+    }
+    if (bold) w *= 1.04;
+    return w > 0 ? Math.ceil(w) + 1 : 0;
+  };
+
+  // Every single character settles in exactly the same bucket as the old regexes
+  const allChars = Array.from({ length: 0x2ff }, (_, i) => String.fromCharCode(i)).join("");
+  assert.equal(o.estTextW(allChars, 11, false), refEstW(allChars, 11, false), "ASCII/Latin-1 bucket equivalence");
+  assert.equal(o.estTextW(allChars, 9.5, true), refEstW(allChars, 9.5, true), "bold bucket equivalence");
+
+  // Mixed scripts: wide CJK and astral code points counted once, ASCII narrow/wide letters
+  for (const s of ["中文宽度测试", "Orchestrator (Neon)", "qwen/qwen-3-32b", "StepFun (China)", "gpt-6.2-sol", "100%", "MWmw", "a😀b", "codex/gpt-6.2",
+    // a lone high surrogate is its own wide code unit and must not swallow
+    // the ASCII letter after it (for..of yields replacement semantics)
+    "\uD800A"]) {
+    for (const [px, bold] of [[11, true], [9.5, false], [10, false]]) {
+      assert.equal(o.estTextW(s, px, bold), refEstW(s, px, bold), `width of ${JSON.stringify(s)} matches`);
+    }
+  }
+  assert.equal(o.estTextW("中文", 11), 23, "two wide glyphs: 2×11×1.00 ceil + 1");
+  assert.equal(o.estTextW("MW", 11), 19, "MW at 0.78px each");
+  assert.equal(o.estTextW("100%", 10), 26, "digits at 0.56, percent at 0.78");
+  assert.equal(o.estTextW("", 11), 0, "empty string is zero-width");
+
+  // Memoization: a repeated call is a cache hit returning the identical value
+  const before = o._estWCache.size;
+  assert.ok(before > 0, "estW cache holds the measurements above");
+  assert.equal(o.estTextW("中文宽度测试", 11, true), refEstW("中文宽度测试", 11, true));
+  assert.equal(o._estWCache.size, before, "cache hit does not grow the memo table");
+  const freshKeyHits = o._estWCache.size;
+  o.estTextW("never-seen-string", 11, false);
+  assert.equal(o._estWCache.size, freshKeyHits + 1, "a miss stores exactly one new entry");
+
+  // fitText: prefixes never exceed their budget, cache repeats are identical
+  const budget = 45;
+  const cut = o.fitText("StepFun (China)", 11, budget, true);
+  assert.ok("StepFun (China)".startsWith(cut) && cut.length < "StepFun (China)".length);
+  assert.ok(o.estTextW(cut, 11, true) <= budget, "truncated prefix fits inside the budget");
+  assert.equal(o.fitText("StepFun (China)", 11, budget, true), cut, "cached truncation repeats identically");
+  assert.equal(o.fitText("short", 11, 500), "short", "a fitting string passes through whole");
+  assert.equal(o.fitText("anything", 11, 0), "", "zero budget truncates to empty");
+
+  // Across an integer boundary in either order: estTextW is always an
+  // integer, so a fractional budget of W - 0.2 truncates exactly like
+  // floor(W) - 1 — never like W. With a rounded cache key the first call's
+  // answer would be served to the second budget, in both directions.
+  // (A fresh instance per order: the wrong-key entries would poison the
+  // cache between the two sequences.)
+  const probe = () => {
+    const probeInstance = m.make({ loaded: true, offline: "" });
+    const probeW = probeInstance.estTextW("abcdefgh", 11, false);
+    assert.ok(Number.isInteger(probeW) && probeW > 0, "estTextW only ever answers positive integers");
+    return { inst: probeInstance, s: "abcdefgh", W: probeW };
+  };
+  for (const order of ["int-then-frac", "frac-then-int"]) {
+    const { inst, s, W } = probe();
+    const calls = order === "int-then-frac"
+      ? [inst.fitText(s, 11, W, false), inst.fitText(s, 11, W - 0.2, false)]
+      : [inst.fitText(s, 11, W - 0.2, false), inst.fitText(s, 11, W, false)];
+    const [full, trimmed] = order === "int-then-frac" ? calls : [calls[1], calls[0]];
+    assert.equal(full, s, `${order}: budget ${W} fits the whole string`);
+    assert.notEqual(trimmed, s, `${order}: budget ${W - 0.2} truncates — estTextW only answers integers, so a width of ${W} never fits under ${W - 0.2}`);
+    assert.ok(trimmed.length < s.length && s.startsWith(trimmed), `${order}: the truncation is a real prefix`);
+    assert.ok(inst.estTextW(trimmed, 11, false) <= W - 0.2, `${order}: the truncated prefix fits inside its own fractional budget`);
+  }
+});
+
+test("stream renders active wires through cached curves, tighter secondary pulses on crowded stages", async () => {
+  const m = await loadMod();
+  const o = m.make({ loaded: true, offline: "", size: { width: 500, height: 600 } });
+  o.stageStyle = "stream";
+  o.agents = [
+    { id: "claude", color: "#d97757" },
+    { id: "codex", color: "#5e95d7" },
+    { id: "pi", color: "#849e4a" },
+    { id: "pig", color: "#00a6b0" },
+  ];
+  o.accounts = [
+    { key: "anthropic", name: "Anthropic", model: "claude-sonnet-4" },
+    { key: "openai", name: "OpenAI", model: "gpt-6.2-sol" },
+    { key: "anyrouter", name: "AnyRouter", model: "claude-fable-5-2" },
+    { key: "devin", name: "Devin", model: "swe-2" },
+  ];
+  // pig -> anthropic is deliberately CROSSED (agent row 3, account row 0):
+  // a same-row wire is drawn as one straight line_to, but a cross-line wire
+  // exercises the cubic-bezier branch of makeCurve, which is what the cold /
+  // hot frame geometry assertions below need.
+  const pairs = [["claude", "anthropic"], ["codex", "openai"], ["pi", "anyrouter"], ["pig", "anthropic"]];
+  pairs.forEach(([a, k], i) => o.routes.set(i + 1, {
+    id: i + 1,
+    agent: a,
+    model: "m",
+    done: false,
+    tries: [{ id: k, name: k, done: false }],
+  }));
+
+  // These wires are long enough that the secondary half-phase pulse applies:
+  // poly.L is 254px, far past the tightened 115px floor.
+  for (const [a, k] of pairs) {
+    const c = o.curveBetween(o.agentIndex(a), o.acctIndex(k));
+    assert.ok(o.flat([c.seg]).L > 115, "fixture wires cross the tightened secondary-pulse floor");
+  }
+
+  const realNow = Date.now;
+  // the cross-line wire's two static pieces: the glow at width 3.5 and the
+  // core at width 1.25, both full curves from the agent port (x0, y0) to the
+  // account dot (x3, y3) with y0 !== y3 — the cubic-bezier branch.
+  const crossC = o.curveBetween(o.agentIndex("pig"), o.acctIndex("anthropic"));
+  assert.notEqual(crossC, null, "the crossed pair has a curve");
+  assert.notEqual(crossC.y0, crossC.y3, "the crossed pair's endpoints are on different rows");
+  const staticWidths = [3.5, 1.25];
+  // static pieces of the crossed wire in a window of the PathBuilder log:
+  // same start, same end, one of the static widths, and more than a bare
+  // move+line (the cubic carries two control points)
+  const crossStatics = (from, to) => m.paths.slice(from, to).filter((p) =>
+    staticWidths.includes(p.width) &&
+    p.ops.length >= 2 &&
+    p.ops[0][0] === "move_to" &&
+    Math.abs(p.ops[0][1] - crossC.x0) < 0.05 &&
+    Math.abs(p.ops[0][2] - crossC.y0) < 0.05 &&
+    // gpui's cubic_bezier_to takes the END point first and the control
+    // points after it, so the endpoint of the last op is always its first
+    // coordinate pair, whatever the op kind
+    Math.abs(p.ops.at(-1)[1] - crossC.x3) < 0.05 &&
+    Math.abs(p.ops.at(-1)[2] - crossC.y3) < 0.05);
+  try {
+    // Curve/flatten caches: the first render tessellates each wire once,
+    // the second render at the same geometry paints fully from cache.
+    let flatCalls = 0;
+    const origFlat = o.flat.bind(o);
+    o.flat = (...a) => { flatCalls++; return origFlat(...a); };
+    Date.now = () => 500;
+    const mark1 = m.paths.length;
+    const tree1 = o.render(m.cx);
+    const coldMark = m.paths.length;
+    const firstPass = flatCalls;
+    const tree2 = o.render(m.cx);
+    const hotMark = m.paths.length;
+    assert.equal(flatCalls - firstPass, 0, "second render tessellates zero wires: getFlat serves the cache");
+    assert.ok(o._flatCache.size > 0 && o._curveCache.size > 0, "polyline and path caches are populated");
+    assert.equal(nodeCount(tree2), nodeCount(tree1), "cached paint output is identical to the uncached one");
+
+    // Cold frame: the crossed wire's glow and core were built exactly once
+    // each, as real cubics ending at the account dot.
+    const coldStatics = crossStatics(mark1, coldMark);
+    assert.equal(coldStatics.filter((p) => p.width === 3.5).length, 1, "cold frame builds the crossed glow once");
+    assert.equal(coldStatics.filter((p) => p.width === 1.25).length, 1, "cold frame builds the crossed core once");
+    for (const p of coldStatics) {
+      assert.ok(p.ops.some(([op]) => op === "cubic_bezier_to"), "a cross-line wire is drawn as a cubic, not a line");
+    }
+    // Hot frame at the same geometry: NOT ONE static piece of the crossed
+    // wire is rebuilt — the cache served the exact same curve.
+    const hotStatics = crossStatics(coldMark, hotMark);
+    assert.equal(hotStatics.length, 0, "hot frame rebuilds no static curve of the crossed wire: makeCurve's cache hit is real");
+
+    // And what paint_path actually received, in both frames, is the same
+    // geometry: identical endpoints and widths for both static pieces. The
+    // pieces are taken out by their own node ids -- wire-glow-pig-anthropic
+    // and wire-core-pig-anthropic -- so the glow's 3.5 and the core's 1.25
+    // can never be mixed up or swapped, the way a width-only filter could
+    // silently trade one for the other.
+    const paintPathOf = (tree, id) => {
+      const el = find(tree, id);
+      assert.notEqual(el, null, `${id} is drawn`);
+      const found = [];
+      const seen = new Set();
+      const walk = (v) => {
+        if (v == null || typeof v !== "object" && typeof v !== "function") return;
+        if (Array.isArray(v)) { v.forEach(walk); return; }
+        const n = v.__node;
+        if (!n || seen.has(n)) return;
+        seen.add(n);
+        if (n.paintPath?.__path) {
+          found.push({ width: n.paintPath.__path.width, ops: n.paintPath.__path.ops.map((o) => [...o]) });
+        }
+        n.kids.forEach(walk);
+      };
+      walk(el);
+      return found;
+    };
+    const staticPieces = (tree) => {
+      const glow = paintPathOf(tree, "wire-glow-pig-anthropic");
+      assert.equal(glow.length, 1, "the glow node carries exactly one paint_path");
+      assert.equal(glow[0].width, 3.5, "the glow of the crossed wire is stroked 3.5 wide");
+      const core = paintPathOf(tree, "wire-core-pig-anthropic");
+      assert.equal(core.length, 1, "the core node carries exactly one paint_path");
+      assert.equal(core[0].width, 1.25, "the core of the crossed wire is stroked 1.25 wide");
+      return { glow: glow[0], core: core[0] };
+    };
+    const coldPieces = staticPieces(tree1);
+    const hotPieces = staticPieces(tree2);
+    for (const [piece, p] of [["glow", coldPieces.glow], ["core", coldPieces.core]]) {
+      // the endpoint coordinates themselves, for the record: the wire leaves
+      // the pig port at row 3 and lands on the anthropic dot at row 0
+      assert.ok(Math.abs(p.ops[0][1] - crossC.x0) < 0.05 && Math.abs(p.ops[0][2] - crossC.y0) < 0.05,
+        `the ${piece} starts at the agent's port`);
+      assert.ok(Math.abs(p.ops.at(-1)[1] - crossC.x3) < 0.05 && Math.abs(p.ops.at(-1)[2] - crossC.y3) < 0.05,
+        `the ${piece} ends at the account's dot`);
+      assert.ok(p.ops.some(([op]) => op === "cubic_bezier_to"), `the ${piece} is drawn as a cubic, not a line`);
+    }
+    assert.deepEqual(hotPieces, coldPieces,
+      "hot frame paints the crossed wire's glow and core with endpoints, control points and widths byte-identical to the cold frame");
+
+    for (const [a, k] of pairs) {
+      assert.notEqual(find(tree1, `wire-core-${a}-${k}`), null, `${a} -> ${k} stream wire is drawn`);
+    }
+
+    // Secondary pulses are suppressed once four wires are active: counting
+    // pointAt() samples (the per-frame tessellation cost) shows 4 active wires
+    // cost strictly less per instant than 3, because the half-phase pulse
+    // disappears for every wire instead of adding a fourth workload.
+    let pointCalls = 0;
+    const origPointAt = o.pointAt.bind(o);
+    o.pointAt = (...a) => { pointCalls++; return origPointAt(...a); };
+    const costOf = (wires, t) => {
+      pairs.forEach(([,], i) => { o.routes.get(i + 1).done = i + 1 > wires; });
+      pointCalls = 0;
+      Date.now = () => t;
+      o.render(m.cx);
+      return pointCalls;
+    };
+    for (const t of [200, 400, 600, 900, 1200]) {
+      const three = costOf(3, t);
+      const four = costOf(4, t);
+      assert.ok(four < three,
+        `at t=${t} four active wires (${four} samples) cost less than three (${three}) ` +
+        "because the secondary pulse is suppressed");
+    }
+    pairs.forEach(([,], i) => { o.routes.get(i + 1).done = false; });
   } finally {
     Date.now = realNow;
   }
