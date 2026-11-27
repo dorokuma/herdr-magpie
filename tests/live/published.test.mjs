@@ -59,20 +59,30 @@ test(`the README's no-clone install lines install ${V}`, { skip }, () => {
 
   const home = tmpdir("home");
   const stub = stubHerdrApp();
-  // those lines unpack to /tmp/herdr-magpie-<whatever is latest>; remove what
-  // this run adds there, whichever version that turns out to be
-  const unpacked = () => fs.readdirSync("/tmp").filter((d) => /^herdr-magpie-\d+\.\d+\.\d+$/.test(d));
-  const before = new Set(unpacked());
-  try {
-    let r;
-    for (let i = 0; i < 3; i++) {
-      r = spawnSync("sh", ["-c", en[0]], { encoding: "utf8", env: { ...process.env, PATH: stub.PATH, HERDR_APP_HOME: home } });
-      if (r.status === 0) break;
-    }
-    assert.equal(r.status, 0, r.stderr);
-    assert.equal(fs.readFileSync(path.join(home, "mods/routing/VERSION"), "utf8").trim(), V);
-    assert.equal(fs.readFileSync(path.join(home, "mods/routing/main.js"), "utf8"), released.stdout, `main.js is the one tagged v${V}`);
-  } finally {
-    for (const d of unpacked()) if (!before.has(d)) fs.rmSync(path.join("/tmp", d), { recursive: true, force: true });
+  // the block is a subshell whose own trap removes the temporary folder it
+  // made, however it ends; nothing of /tmp is swept here
+  let r;
+  for (let i = 0; i < 3; i++) {
+    r = spawnSync("sh", ["-c", en[0]], { encoding: "utf8", env: { ...process.env, PATH: stub.PATH, HERDR_APP_HOME: home } });
+    if (r.status === 0) break;
   }
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.readFileSync(path.join(home, "mods/routing/VERSION"), "utf8").trim(), V);
+  assert.equal(fs.readFileSync(path.join(home, "mods/routing/main.js"), "utf8"), released.stdout, `main.js is the one tagged v${V}`);
+});
+
+// The PowerShell pendant of those lines, for a Herdr on Windows: not executed
+// here (no PowerShell on the release machine), but its exact text is part of
+// the release contract -- both READMEs must carry the same one block.
+const pastedPs = (file) => {
+  const blocks = [...fs.readFileSync(path.join(ROOT, file), "utf8").matchAll(/```powershell\n([\s\S]*?)```/g)].map((b) => b[1]);
+  return blocks.filter((b) => b.includes("releases/latest") && b.includes("install.ps1"));
+};
+
+test("the READMEs' PowerShell install block is one and the same in both languages", { skip }, () => {
+  const en = pastedPs("README.md"), zh = pastedPs("README.zh-CN.md");
+  assert.equal(en.length, 1, "README.md has one PowerShell install block");
+  assert.equal(zh.length, 1, "README.zh-CN.md has one PowerShell install block");
+  assert.deepEqual(zh, en, "README.zh-CN.md gives the same lines, byte for byte");
+  assert.ok(!/herdr-magpie-\d+\.\d+\.\d+/.test(en[0]), "no version is pinned into the block");
 });

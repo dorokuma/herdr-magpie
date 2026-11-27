@@ -12,7 +12,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   loadMod, storage, offlineExec, fakeRelease, packTree, treeVersion, oldInstall,
-  releasedMods, stubHerdrApp, sha256, tmpdir, MAIN, REPO,
+  releasedMods, stubHerdrApp, sha256, tmpdir, MAIN, REPO, ROOT,
 } from "./harness.mjs";
 
 const V = treeVersion();
@@ -272,4 +272,260 @@ test("install.sh, run from an unpacked release, lays the mods and the layout dow
   r = run();
   assert.equal(r.status, 0, r.stderr);
   assert.equal(fs.readFileSync(path.join(home, "mods/routing/config.json"), "utf8"), '{"mine":true}', "a second run keeps config.json");
+});
+
+test("install.sh honours XDG_CONFIG_HOME over HOME, and HERDR_APP_HOME over both", () => {
+  const src = unpack(packTree(), V);
+  const stub = stubHerdrApp();
+  const base = { ...process.env, PATH: stub.PATH };
+  delete base.HERDR_APP_HOME;
+  const xdg = tmpdir("xdg");
+  const fakeHome = tmpdir("home");
+
+  const r = spawnSync(path.join(src, "install.sh"), [], { encoding: "utf8", env: { ...base, XDG_CONFIG_HOME: xdg, HOME: fakeHome } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(fs.existsSync(path.join(xdg, "herdr-app/mods/routing/main.js")), "installed under $XDG_CONFIG_HOME/herdr-app");
+  assert.ok(!fs.existsSync(path.join(fakeHome, ".config/herdr-app")), "HOME's .config was not used");
+
+  const override = tmpdir("override");
+  const r2 = spawnSync(path.join(src, "install.sh"), [], { encoding: "utf8", env: { ...base, XDG_CONFIG_HOME: xdg, HOME: fakeHome, HERDR_APP_HOME: override } });
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.ok(fs.existsSync(path.join(override, "mods/routing/main.js")), "HERDR_APP_HOME wins over XDG_CONFIG_HOME");
+});
+
+test("install.sh refuses to fall into '/.config/herdr-app' when HOME is empty or '/'", () => {
+  const src = unpack(packTree(), V);
+  // an isolated PATH whose mkdir and herdr-app are stand-ins that refuse to
+  // run: if the installer ever reaches either of them the refusal has failed,
+  // wherever in the filesystem it was headed
+  const bin = tmpdir("bin");
+  const log = path.join(bin, "calls.log");
+  for (const tool of ["mkdir", "herdr-app"]) {
+    fs.writeFileSync(path.join(bin, tool), `#!/bin/sh\nprintf '%s\\n' '${tool}' >> '${log}'\necho '${tool}: refusing to run inside this test' >&2\nexit 1\n`, { mode: 0o755 });
+  }
+  const base = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` };
+  delete base.HERDR_APP_HOME;
+  delete base.XDG_CONFIG_HOME;
+
+  for (const bad of ["", "/"]) {
+    const r = spawnSync(path.join(src, "install.sh"), [], { encoding: "utf8", env: { ...base, HOME: bad } });
+    assert.notEqual(r.status, 0, `HOME='${bad}' must not install`);
+    assert.match(r.stderr, /HOME/, "the refusal says why");
+    assert.ok(!r.stdout.includes("Installed herdr-magpie"), "nothing was installed");
+  }
+  assert.ok(!fs.existsSync(log), "neither mkdir nor herdr-app was ever reached");
+});
+
+test("install.sh never copies a source mods/routing/config.json over the installed one", () => {
+  const src = unpack(packTree(), V);
+  const home = tmpdir("home");
+  const stub = stubHerdrApp();
+
+  // a clone someone configured before running the installer: config.json sits
+  // in the source tree, untracked, never part of the release
+  fs.writeFileSync(path.join(src, "mods/routing/config.json"), '{"source":true}\n');
+  // an install that is already configured differently
+  const target = path.join(home, "mods/routing");
+  fs.mkdirSync(target, { recursive: true });
+  fs.writeFileSync(path.join(target, "config.json"), '{"mine":true}\n');
+  const before = fs.readFileSync(path.join(target, "config.json"));
+
+  const r = spawnSync(path.join(src, "install.sh"), [], { encoding: "utf8", env: { ...process.env, PATH: stub.PATH, HERDR_APP_HOME: home } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(fs.readFileSync(path.join(target, "config.json")), before, "the installed config.json is byte for byte what it was");
+  assert.ok(fs.existsSync(path.join(target, "config.example.json")), "config.example.json is installed");
+});
+
+// --- Windows: the platform the panel runs on -----------------------------------
+// herdr's window() answers the platform; the harness hands it in. On Windows
+// there is no /bin/sh and no /dev/null, so the mod phrases its probes and its
+// updater for PowerShell and NUL instead.
+
+test("on Windows the release look discards the body into NUL, not /dev/null", async () => {
+  const calls = [];
+  const exec = async (cmd, args = []) => {
+    calls.push([cmd, ...args]);
+    return { code: 0, stdout: `https://github.com/${REPO}/releases/tag/v9.9.9`, stderr: "" };
+  };
+  const m = await loadMod({ window: () => ({ platform: "windows" }), exec });
+  const o = m.make({ configReady: true });
+  assert.equal(o.isWindows(), true);
+  assert.equal(await o.latestRelease(), "9.9.9");
+  const curl = calls[0];
+  assert.equal(curl[0], "curl");
+  assert.ok(curl.includes("NUL"), "the body goes to NUL");
+  assert.ok(!curl.includes("/dev/null"), "never /dev/null on Windows");
+});
+
+test("on Windows the updater is the PowerShell one, checksummed and atomic", async () => {
+  const calls = [];
+  const exec = async (cmd, args = []) => {
+    calls.push([cmd, ...(args || [])]);
+    if (cmd === "curl") return { code: 0, stdout: `https://github.com/${REPO}/releases/tag/v9.9.9`, stderr: "" };
+    if (cmd === "powershell.exe") return { code: 0, stdout: "", stderr: "" };
+    throw new Error(`unexpected command ${cmd}`);
+  };
+  // a home spelled the way a real user folder can be: curly apostrophe,
+  // spaces, brackets -- every one of them legal and lethal to naive quoting
+  const home = "C:\\Users\\O\u2019Connor [dev]\\.config\\herdr-app";
+  const m = await loadMod({ window: () => ({ platform: "windows" }), exec, home });
+  const o = m.make({ configReady: true });
+  o.modVersion = "0.0.1";
+  await o.updateMod(m.cx);
+  const ps = calls.find((c) => c[0] === "powershell.exe");
+  assert.ok(ps, "powershell.exe was run");
+  assert.ok(!calls.some((c) => c[0] === "sh"), "no sh on Windows");
+  assert.deepEqual(ps.slice(1, 4), ["-NoProfile", "-NonInteractive", "-Command"]);
+  const script = ps[4];
+  for (const piece of ["System32\\curl.exe", "System32\\tar.exe", "Get-FileHash", "checksum mismatch", "missing its mods"]) {
+    assert.ok(script.includes(piece), `the script mentions ${piece}`);
+  }
+  // the home never appears as text: it is passed as Base64 data and decoded
+  // inside the script, byte for byte the UTF-8 of the original path
+  assert.ok(!script.includes("O\u2019Connor"), "the raw path is not spliced into the script");
+  assert.ok(!script.includes(home), "not even a quoting-safe fragment of it is");
+  const b64 = /FromBase64String\('([A-Za-z0-9+/=]+)'\)/.exec(script)?.[1];
+  assert.ok(b64, "the home is passed as Base64");
+  assert.equal(Buffer.from(b64, "base64").toString("utf8"), home, "decoding hands back the exact path");
+  // file operations are wildcard- and quote-proof, the swap is atomic, and
+  // every native command's exit code is looked at
+  assert.ok(script.includes("-LiteralPath"), "file operations use -LiteralPath");
+  assert.ok(!script.includes("\\*')"), "no \\* wildcard tails in copy paths");
+  assert.ok(script.includes("[IO.File]::Replace($TmpMain, $DstMain, [System.Management.Automation.Language.NullString]::Value)"),
+    "main.js is swapped in by the atomic ReplaceFileW, the null backup passed so PowerShell 5.1 marshals a real CLR null");
+  assert.ok(!script.includes("[IO.File]::Replace($TmpMain, $DstMain, $null)"), "a bare $null never reaches ReplaceFileW's backup parameter");
+  assert.ok(/\[IO\.File\]::Move\(\$TmpMain, \$DstMain\)/.test(script), "with an atomic Move when nothing is there yet");
+  assert.ok(/Copy-Item -Force -LiteralPath [\s\S]*\.main\.js\.new[\s\S]*\[IO\.File\]::(Replace|Move)/.test(script),
+    "main.js is staged as .main.js.new and swapped in atomically, last");
+  // curl and tar are native commands that never raise: the failure branch of
+  // each must read the exit code right where the command ran, not somewhere
+  // downstream of it
+  assert.ok(/& \$Curl -fsSL --max-time \$Timeout -o "\$Out" \$Url\n\s+if \(\$LASTEXITCODE -eq 0\) \{ return \}/.test(script),
+    "curl's exit code decides the download retry loop");
+  assert.ok(/for \(\$n = 0; \$n -lt 3; \$n\+\+\) \{[\s\S]*?\n    \}\n    \[Console\]::Error\.WriteLine\("download failed: \$Url"\); exit 1/.test(script),
+    "three failed tries end the script in exit 1, right after the retry loop");
+  assert.ok(/& \$Tar xzf [^\n]*\n\s+if \(\$LASTEXITCODE -ne 0\) \{ \[Console\]::Error\.WriteLine\('could not unpack the release'\); exit 1 \}/.test(script),
+    "tar's exit code is checked immediately after unpacking");
+  // the overlay never installs a config.json, whatever the archive carries
+  assert.ok(/Get-ChildItem -LiteralPath \(Join-Path \$X 'mods\\routing'\) -Force \| Where-Object \{ \$_\.Name -ne 'config\.json' \} \| ForEach-Object \{ Copy-Item/.test(script),
+    "the mods\\routing overlay filters config.json out");
+  assert.ok(fs.existsSync(path.join(ROOT, "mods/routing/config.example.json")), "config.example.json is what the release ships instead");
+  assert.ok(script.includes("GetTempPath") && script.includes("finally"), "a temporary folder, cleaned in finally");
+  assert.equal(o.updateError, "", "a clean powershell run installs without error");
+});
+
+test("on Windows provider discovery is phrased for PowerShell, follows magpie's XDG rules and parses providers.json", async () => {
+  const calls = [];
+  const fixture = JSON.stringify({
+    providers: [
+      { id: "MyProvider", icon: "data:image/svg+xml;base64,xyz" },
+      { id: "filebacked", icon: "file:/tmp/icon.svg" },
+    ],
+  });
+  const opts = [];
+  const exec = async (cmd, args = [], o3) => {
+    calls.push([cmd, ...(args || [])]);
+    opts.push(o3);
+    return { code: 0, stdout: fixture, stderr: "" };
+  };
+  const m = await loadMod({ window: () => ({ platform: "windows" }), exec });
+  const o = m.make({ configReady: true });
+  await o.discoverProviders();
+  const probe = calls[0];
+  assert.equal(probe[0], "powershell.exe", "PowerShell does the probing");
+  assert.ok(!calls.some((c) => c[0] === "sh"), "no sh on Windows");
+  assert.ok(probe[4].includes("XDG_CONFIG_HOME") && probe[4].includes("USERPROFILE"), "both config roots are named");
+  assert.ok(probe[4].includes("magpie") && probe[4].includes("providers.json"), "it reads magpie's providers.json");
+
+  // a real providers.json document is parsed into the provider -> icon map;
+  // file:-backed icons (local files, not part of the discovery) are not taken
+  assert.equal(o.providerIcons.get("myprovider"), "data:image/svg+xml;base64,xyz", "the provider's icon is discovered");
+  assert.ok(!o.providerIcons.has("filebacked"), "file: icons are not taken");
+
+  // magpie's own rule: an XDG_CONFIG_HOME that is a full path is the ONLY
+  // config root -- no falling back to the profile when the file is not there --
+  // and only an unset or non-absolute one reads the profile copy. The probe
+  // picks exactly one path: the elseif is what keeps the fallback from
+  // running after a valid XDG root, and the regex is what keeps a
+  // drive-relative C:relative out of the roots.
+  assert.ok(/\$p = Join-Path \(Join-Path \$xdg 'magpie'\)[\s\S]*?elseif/.test(probe[4]),
+    "a valid absolute XDG root never falls back to the profile copy");
+  assert.ok(/\$xdg -match '\^\[A-Za-z\]:/.test(probe[4]), "the XDG root must be a full drive or UNC path");
+  assert.ok(!probe[4].includes("IsPathRooted"), "IsPathRooted is not trusted (it passes drive-relative C:x)");
+
+  // the regex itself, extracted from the probe the production code generated
+  // rather than spelled out again here: whatever the mod ships is what these
+  // cases run against. Full drive paths and UNC shares -- backslashes and
+  // forward slashes alike -- pass; drive-relative and plain relative ones,
+  // and a lone leading slash, do not.
+  const pat = /\$xdg -match '([^']+)'/.exec(probe[4])?.[1];
+  assert.ok(pat, "the probe's absolute-path test is a single-quoted regex");
+  const re = new RegExp(pat);
+  for (const abs of ["C:\\cfg", "C:/cfg", "\\\\server\\share\\cfg", "//server/share/cfg"]) {
+    assert.ok(re.test(abs), `${JSON.stringify(abs)} is absolute`);
+  }
+  for (const rel of ["C:relative", "\\foo", "/foo", "relative"]) {
+    assert.ok(!re.test(rel), `${JSON.stringify(rel)} is not absolute`);
+  }
+
+  // and off Windows the same probe stays a shell one, XDG first, and a
+  // remote host always gets the shell form even from a Windows panel
+  const m2 = await loadMod({ exec });
+  const o2 = m2.make({ configReady: true });
+  await o2.discoverProviders();
+  const unix = calls.filter((c) => c[0] === "sh").pop();
+  assert.ok(unix, "sh does the probing on Linux/macOS");
+  assert.ok(unix[2].includes("$XDG_CONFIG_HOME/magpie/providers.json"), "XDG_CONFIG_HOME is honoured first");
+
+  const m3 = await loadMod({ window: () => ({ platform: "windows" }), exec });
+  const o3 = m3.make({ configReady: true });
+  o3.remote = "my-box";
+  calls.length = 0;
+  opts.length = 0;
+  await o3.discoverProviders();
+  assert.equal(calls[0][0], "sh", "a remote host is probed over sh even from a Windows panel");
+  assert.ok(!calls.some((c) => c[0] === "powershell.exe"), "never PowerShell for a remote host");
+  assert.equal(opts[0]?.on, o3.remote, "the probe is exec'd on the remote host, not the panel's");
+});
+
+test("install.ps1, the Windows installer, never poisons a successful install's exit code", () => {
+  // PowerShell cannot run on the machines this suite targets, so what is
+  // checked is the script's text -- the same defense the updater tests use
+  // for the generated one.
+  const ps1 = fs.readFileSync(path.join(ROOT, "install.ps1"), "utf8");
+  // the checks stay fatal, by exit code, while the layout switch stays
+  // best-effort inside its try/catch
+  assert.equal((ps1.match(/if \(\$LASTEXITCODE -ne 0\) \{ throw "herdr-app check failed/g) || []).length, 2,
+    "both herdr-app checks throw on a non-zero exit");
+  assert.ok(/try \{[\s\S]*layout\.switch[\s\S]*\} catch \{ \}/.test(ps1), "layout.switch is best-effort");
+  // a successful install ends 0 even when that best-effort switch exited
+  // non-zero: the script's own exit, right after the success line, is what
+  // the caller reads, not a leftover $LASTEXITCODE
+  assert.ok(/Write-Output "Installed herdr-magpie into \$HerdrHome"[\s\S]*\nexit 0\s*$/.test(ps1),
+    "the script ends in an explicit exit 0");
+  // Legacy argument passing is the default before PowerShell 7.3, where the
+  // PSNativeCommandArgumentPassing variable does not exist at all: a missing
+  // variable must read as Legacy, not as a modern pass-through
+  assert.ok(ps1.includes("$argPassVar = Get-Variable -Name PSNativeCommandArgumentPassing -ErrorAction SilentlyContinue"),
+    "the variable is probed tolerantly");
+  assert.ok(ps1.includes("$legacy = ($null -eq $argPassVar) -or ($argPassVar.Value -eq 'Legacy')"),
+    "an absent variable (5.1, 7.0-7.2) or a Legacy value takes the escaped-JSON form");
+  // each branch passes its own spelling: Legacy needs the quotes escaped
+  // (else the JSON arrives stripped), modern passing must NOT escape them
+  assert.ok(/if \(\$legacy\) \{\n\s+& \$HerdrAppBin do layout\.switch '\{\\"name\\":\\"Magpie\\"\}' \*>\$null\n\s+\}/.test(ps1),
+    "the legacy branch passes the escaped-JSON form");
+  assert.ok(/else \{\n\s+& \$HerdrAppBin do layout\.switch '\{"name":"Magpie"\}' \*>\$null\n\s+\}/.test(ps1),
+    "the modern branch passes the plain JSON form");
+  // and the overlay copy filters config.json out of mods\routing, by the
+  // same rule the updater's copy follows
+  assert.ok(/Get-ChildItem -LiteralPath \(Join-Path \$SrcDir 'mods\\routing'\) -Force \| Where-Object \{ \$_\.Name -ne 'config\.json' \} \| ForEach-Object/.test(ps1),
+    "the mods\\routing copy filters config.json out");
+});
+
+test("during herdr-app check window() is null: the mod constructs and is not Windows", async () => {
+  const m = await loadMod({ window: () => null, exec: async () => ({ code: 0, stdout: "", stderr: "" }) });
+  let o;
+  assert.doesNotThrow(() => { o = m.make({ configReady: true }); }, "construction never touches a null window()");
+  assert.equal(o.isWindows(), false, "no window: the Unix answers");
+  assert.doesNotThrow(() => o.updateScript("9.9.9"), "the Unix updater is generated");
 });
