@@ -51,7 +51,7 @@ test("one Requests header carries the counts", async () => {
 test("filtering by an agent puts its chip after the title and counts only its requests", async () => {
   const { o, draw } = await demo();
   o.selectedAgent = "claude";
-  assert.deepEqual(header(draw()), ["Requests", "claude", "×", "1 active", "·", "1 recent"]);
+  assert.deepEqual(header(draw()), ["Requests", "Claude", "×", "1 active", "·", "1 recent"]);
 });
 
 test("the old labels are gone", async () => {
