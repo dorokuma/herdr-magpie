@@ -2679,7 +2679,11 @@ export default class Routing extends View {
         ? acctNeed
         : Math.max(28, Math.min(110, afterAgent - minBadgeTotal));
       const acctTxt = this.fitText(acct, 11, acctMax, true);
-      const badgeRem = afterAgent - this.estTextW(acctTxt, 11, true) - 20;
+      // badge chrome is 22px, not 20: px(6)*2 + border(2) + ml(2) shell = 16,
+      // plus the gap(4) the badge adds as a seventh flex child — the row's
+      // fixed chrome with a badge is 76px (icon 13 + 7 gaps 28 + arrow 12 +
+      // shell 16 + spacer 2 + dot 5), so the text budget must shrink by 2.
+      const badgeRem = afterAgent - this.estTextW(acctTxt, 11, true) - 22;
       const badgeTxt = (badgeRaw && badgeRem >= 20) ? this.fitText(badgeRaw, 9.5, badgeRem, false) : "";
 
       const plW = g.W < 270 ? 15 : 17;

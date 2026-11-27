@@ -403,6 +403,7 @@ test("two-line request rows render route badge on line 1, live telemetry phases 
     const t2 = fmtClock(FIXED_NOW - 18400);
     const t3 = fmtClock(FIXED_NOW - 31400);
     const t4 = fmtClock(FIXED_NOW - 60000);
+    const t5 = fmtClock(FIXED_NOW - 2500);
     o.agents = [
       { id: "codex", color: "#5e95d7" },
       { id: "agy", color: "#00a6b0" },
@@ -466,6 +467,17 @@ test("two-line request rows render route badge on line 1, live telemetry phases 
       usage: [{ in: 0, cache_read: 416656 }],
       tries: [{ id: "antigravity", name: "Antigravity", status: 200, done: true }],
     });
+    // 5. Active, no route badge: timestamp still owns the end of line 1.
+    o.routes.set(5, {
+      id: 5,
+      agent: "pig",
+      model: "codex/gpt-6.2-sol",
+      served: "codex/gpt-6.2-sol",
+      time: new Date(FIXED_NOW - 2500).toISOString(),
+      done: false,
+      prompt: { tokens: 146304 },
+      tries: [{ id: "codex", name: "Codex", done: false }],
+    });
 
     const tree = o.render(m.cx);
     const row1 = texts(find(tree, "req-row-1"));
@@ -481,14 +493,25 @@ test("two-line request rows render route badge on line 1, live telemetry phases 
     assert.deepEqual(row4.slice(0, 6), ["mods/routing/icons/antigravity-color.png", "Agy", "→", "Antigravity", "agy · Orchestrator (Neon)", t4]);
     assert.equal(row4[6], "417k tok · 6.5s · 53 tok/s · 100% cached");
 
-    // Narrow width (W=246): assert concrete rendered fields, meaningful truncated prefixes, no ellipses, and timestamp width budget
+    const row5 = texts(find(tree, "req-row-5"));
+    assert.deepEqual(row5, ["mods/routing/icons/pig.png", "Pig", "→", "Codex", "gpt-6.2-sol", t5, "Waiting", "· 146k in", "2s"],
+      "model-only badge row keeps the timestamp as the last item on line 1");
+
+    // Narrow width (W=246): read the row's first and second line subtrees
+    // directly — the timestamp must sit inside line 1, phase/elapsed inside
+    // line 2 — and assert concrete rendered fields, meaningful truncated
+    // prefixes, no ellipses, and the timestamp width budget against the
+    // actual fixed chrome (76px with a badge, 56px without).
     o.size = { width: 246, height: 600 };
     const rowInnerW = (o.geometry().W + 14) - 4;
     const narrowTree = o.render(m.cx);
-    const narrowRow1 = texts(find(narrowTree, "req-row-1"));
-    const narrowRow2 = texts(find(narrowTree, "req-row-2"));
-    const narrowRow3 = texts(find(narrowTree, "req-row-3"));
-    const narrowRow4 = texts(find(narrowTree, "req-row-4"));
+    const line1of = (id) => texts(find(narrowTree, `req-row-${id}`).__node.kids[0]);
+    const line2of = (id) => texts(find(narrowTree, `req-row-${id}`).__node.kids[1]);
+    const narrowRow1 = [...line1of(1), ...line2of(1)];
+    const narrowRow2 = [...line1of(2), ...line2of(2)];
+    const narrowRow3 = [...line1of(3), ...line2of(3)];
+    const narrowRow4 = [...line1of(4), ...line2of(4)];
+    const narrowRow5 = [...line1of(5), ...line2of(5)];
 
     assert.deepEqual(narrowRow1, ["mods/routing/icons/codex-color.png", "Codex", "→", "Codex", "gpt-6.2-sol", t1, "Waiting", "· 146k in", "5s"]);
     assert.deepEqual(narrowRow2, ["mods/routing/icons/codex-color.png", "Codex", "→", "Codex", "gpt-6.2-sol", t2, "Thinking", "· 146k in", "18s"]);
@@ -503,11 +526,47 @@ test("two-line request rows render route badge on line 1, live telemetry phases 
     assert.equal(narrowRow4[5], t4, "timestamp stays present at index 5 on line 1");
     assert.equal(narrowRow4[6], "417k tok · 6.5s · 53 tok/s · 100% cached");
 
-    for (const [id, rt] of [[1, narrowRow1], [2, narrowRow2], [3, narrowRow3], [4, narrowRow4]]) {
+    assert.deepEqual(narrowRow5, ["mods/routing/icons/pig.png", "Pig", "→", "Codex", "gpt-6.2-sol", t5, "Waiting", "· 146k in", "2s"],
+      "model-only badge row keeps the timestamp as the last item on line 1 at W=246");
+
+    // Row shape per line subtree: line 1 = [icon, agent, "→", acct, badge, time]
+    // with a badge, [icon, agent, "→", acct, time] without one;
+    // line 2 = active [phase, meta, elapsed] / done [stat, ...].
+    const rowsById = [
+      [1, t1, "Waiting", "5s"],
+      [2, t2, "Thinking", "18s"],
+      [3, t3, "Streaming", "31s"],
+      [5, t5, "Waiting", "2s"],
+    ];
+    for (const [id, ts, phase, elapsed] of rowsById) {
+      const l1 = line1of(id), l2 = line2of(id);
+      assert.ok(l1.includes(ts), `row ${id}: timestamp ${ts} sits inside the line-1 subtree`);
+      assert.ok(!l2.includes(ts), `row ${id}: timestamp does not leak into line 2`);
+      assert.ok(l2.includes(phase), `row ${id}: phase ${phase} sits inside the line-2 subtree`);
+      assert.ok(l2.includes(elapsed), `row ${id}: elapsed ${elapsed} sits inside the line-2 subtree`);
+      assert.ok(!l1.includes(phase) && !l1.includes(elapsed), `row ${id}: phase/elapsed stay out of line 1`);
+    }
+    {
+      const l1 = line1of(4), l2 = line2of(4);
+      assert.ok(l1.includes(t4), `row 4: timestamp ${t4} sits inside the line-1 subtree`);
+      assert.ok(!l2.includes(t4), "row 4: timestamp does not leak into line 2");
+      assert.ok(l2.includes("417k tok · 6.5s · 53 tok/s · 100% cached"),
+        "row 4: done-row stat with duration sits inside the line-2 subtree");
+    }
+
+    for (const [id, l1, rt] of [[1, line1of(1), narrowRow1], [2, line1of(2), narrowRow2], [3, line1of(3), narrowRow3], [4, line1of(4), narrowRow4], [5, line1of(5), narrowRow5]]) {
       assert.ok(!rt.some((s) => s.includes("\u2026") || s.includes("...")), `row ${id} has no ellipsis at W=246`);
-      const line1Used = 54 + o.estTextW(rt[5], 10, false) +
-        o.estTextW(rt[1], 11.5, true) + o.estTextW(rt[3], 11, true) +
-        (rt[4] ? 20 + o.estTextW(rt[4], 9.5, false) : 0);
+      const hasBadge = l1.length === 6;
+      assert.equal(l1.length, hasBadge ? 6 : 5, `row ${id} line 1 shape matches its badge presence`);
+      const timeIdx = l1.length - 1;
+      const badgeIdx = hasBadge ? 4 : -1;
+      // Fixed chrome measured off the row's flex children: icon 13 + arrow 12
+      // + spacer min 2 + dot 5 + gaps (6×4=24, or 7×4=28 once the badge joins)
+      // + badge shell (ml 2 + px 12 + border 2 = 16) = 56px, or 76px with a badge.
+      const fixedChrome = hasBadge ? 76 : 56;
+      const line1Used = fixedChrome + o.estTextW(l1[timeIdx], 10, false) +
+        o.estTextW(l1[1], 11.5, true) + o.estTextW(l1[3], 11, true) +
+        (hasBadge ? o.estTextW(l1[badgeIdx], 9.5, false) : 0);
       assert.ok(line1Used <= rowInnerW, `row ${id} line 1 width (${line1Used}px) fits within container (${rowInnerW}px) so timestamp is never clipped`);
     }
   } finally {
@@ -534,42 +593,52 @@ test("minimal stage style skips intermediate fly-frame redraws without dropping 
   const frameTimer = timers.find((t) => t.ms === 33);
   assert.ok(frameTimer, "registers 33ms (~30 FPS) animation frame timer");
 
-  const now = Date.now();
-  o.agents = [{ id: "codex", color: "#5e95d7" }];
-  o.accounts = [{ key: "codex", name: "Codex", model: "gpt-6.2-sol" }];
-  o.routes.set(1, {
-    id: 1,
-    agent: "codex",
-    done: false,
-    time: new Date(now - 5000).toISOString(),
-    tries: [{ id: "codex", name: "Codex", done: false }],
-  });
-  o.flights.set(1, {
-    id: 1,
-    agent: "codex",
-    color: "#5e95d7",
-    seat: "codex",
-    state: "fly",
-    phase: "out",
-    tryIndex: 0,
-    segs: [[70, 32, 140, 32, 140, 32, 210, 32]],
-    ms: 5000,
-    t0: now - 100,
-    bird: "req",
-    birdT0: now - 100,
-    awayT0: null,
-  });
-  o.lastSecTick = now + 5000;
+  // Freeze the wall clock so both manual frame callbacks read the same now:
+  // a paused process (≥ 4.9s since t0) would otherwise flip the flight
+  // fly → held inside the first frame and redraw for the wrong reason.
+  const realNow = Date.now;
+  const FIXED_NOW = realNow();
+  Date.now = () => FIXED_NOW;
+  try {
+    const now = FIXED_NOW;
+    o.agents = [{ id: "codex", color: "#5e95d7" }];
+    o.accounts = [{ key: "codex", name: "Codex", model: "gpt-6.2-sol" }];
+    o.routes.set(1, {
+      id: 1,
+      agent: "codex",
+      done: false,
+      time: new Date(now - 5000).toISOString(),
+      tries: [{ id: "codex", name: "Codex", done: false }],
+    });
+    o.flights.set(1, {
+      id: 1,
+      agent: "codex",
+      color: "#5e95d7",
+      seat: "codex",
+      state: "fly",
+      phase: "out",
+      tryIndex: 0,
+      segs: [[70, 32, 140, 32, 140, 32, 210, 32]],
+      ms: 5000,
+      t0: now - 100,
+      bird: "req",
+      birdT0: now - 100,
+      awayT0: null,
+    });
+    o.lastSecTick = now + 5000;
 
-  // Minimal skips intermediate fly-frame notify() calls
-  o.stageStyle = "minimal";
-  const minBefore = m.cx.redraws;
-  frameTimer.fn(m.cx);
-  assert.equal(m.cx.redraws, minBefore, "minimal skips unnecessary fly redraws");
+    // Minimal skips intermediate fly-frame notify() calls
+    o.stageStyle = "minimal";
+    const minBefore = m.cx.redraws;
+    frameTimer.fn(m.cx);
+    assert.equal(m.cx.redraws, minBefore, "minimal skips unnecessary fly redraws");
 
-  // Stream animates at 33ms
-  o.stageStyle = "stream";
-  const streamBefore = m.cx.redraws;
-  frameTimer.fn(m.cx);
-  assert.equal(m.cx.redraws, streamBefore + 1, "stream triggers frame redraw while flying");
+    // Stream animates at 33ms
+    o.stageStyle = "stream";
+    const streamBefore = m.cx.redraws;
+    frameTimer.fn(m.cx);
+    assert.equal(m.cx.redraws, streamBefore + 1, "stream triggers frame redraw while flying");
+  } finally {
+    Date.now = realNow;
+  }
 });
