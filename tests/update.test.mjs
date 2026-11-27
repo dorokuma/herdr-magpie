@@ -395,11 +395,18 @@ exit 22
 // its folder in here.
 function pipedInstall(dir, { home, version, env = {}, before = "" } = {}) {
   const stub = stubHerdrApp();
+  // HERDR_MAGPIE_RELEASE_BASE / HERDR_MAGPIE_VERSION re-point the installer:
+  // whatever the host shell has them set to must never steer an offline unit
+  // test at a server the test did not stand up. They are dropped here, and
+  // only the test's own fixture values (or an explicit override) go back in.
+  const hostEnv = { ...process.env };
+  delete hostEnv.HERDR_MAGPIE_RELEASE_BASE;
+  delete hostEnv.HERDR_MAGPIE_VERSION;
   const r = spawnSync("bash", [], {
     input: fs.readFileSync(path.join(ROOT, "install.sh"), "utf8"),
     encoding: "utf8",
     env: {
-      ...process.env,
+      ...hostEnv,
       PATH: `${before ? `${before}${path.delimiter}` : ""}${stubCurl()}${path.delimiter}${stub.PATH}`,
       HERDR_APP_HOME: home,
       HERDR_MAGPIE_RELEASE_BASE: `${pathToFileURL(dir).href}`,

@@ -642,7 +642,10 @@ test("estTextW memoizes while matching the pre-optimization widths exactly, fitT
   assert.equal(o.estTextW(allChars, 9.5, true), refEstW(allChars, 9.5, true), "bold bucket equivalence");
 
   // Mixed scripts: wide CJK and astral code points counted once, ASCII narrow/wide letters
-  for (const s of ["中文宽度测试", "Orchestrator (Neon)", "qwen/qwen-3-32b", "StepFun (China)", "gpt-6.2-sol", "100%", "MWmw", "a😀b", "codex/gpt-6.2"]) {
+  for (const s of ["中文宽度测试", "Orchestrator (Neon)", "qwen/qwen-3-32b", "StepFun (China)", "gpt-6.2-sol", "100%", "MWmw", "a😀b", "codex/gpt-6.2",
+    // a lone high surrogate is its own wide code unit and must not swallow
+    // the ASCII letter after it (for..of yields replacement semantics)
+    "\uD800A"]) {
     for (const [px, bold] of [[11, true], [9.5, false], [10, false]]) {
       assert.equal(o.estTextW(s, px, bold), refEstW(s, px, bold), `width of ${JSON.stringify(s)} matches`);
     }
@@ -669,6 +672,30 @@ test("estTextW memoizes while matching the pre-optimization widths exactly, fitT
   assert.equal(o.fitText("StepFun (China)", 11, budget, true), cut, "cached truncation repeats identically");
   assert.equal(o.fitText("short", 11, 500), "short", "a fitting string passes through whole");
   assert.equal(o.fitText("anything", 11, 0), "", "zero budget truncates to empty");
+
+  // Across an integer boundary in either order: estTextW is always an
+  // integer, so a fractional budget of W - 0.2 truncates exactly like
+  // floor(W) - 1 — never like W. With a rounded cache key the first call's
+  // answer would be served to the second budget, in both directions.
+  // (A fresh instance per order: the wrong-key entries would poison the
+  // cache between the two sequences.)
+  const probe = () => {
+    const probeInstance = m.make({ loaded: true, offline: "" });
+    const probeW = probeInstance.estTextW("abcdefgh", 11, false);
+    assert.ok(Number.isInteger(probeW) && probeW > 0, "estTextW only ever answers positive integers");
+    return { inst: probeInstance, s: "abcdefgh", W: probeW };
+  };
+  for (const order of ["int-then-frac", "frac-then-int"]) {
+    const { inst, s, W } = probe();
+    const calls = order === "int-then-frac"
+      ? [inst.fitText(s, 11, W, false), inst.fitText(s, 11, W - 0.2, false)]
+      : [inst.fitText(s, 11, W - 0.2, false), inst.fitText(s, 11, W, false)];
+    const [full, trimmed] = order === "int-then-frac" ? calls : [calls[1], calls[0]];
+    assert.equal(full, s, `${order}: budget ${W} fits the whole string`);
+    assert.notEqual(trimmed, s, `${order}: budget ${W - 0.2} truncates — estTextW only answers integers, so a width of ${W} never fits under ${W - 0.2}`);
+    assert.ok(trimmed.length < s.length && s.startsWith(trimmed), `${order}: the truncation is a real prefix`);
+    assert.ok(inst.estTextW(trimmed, 11, false) <= W - 0.2, `${order}: the truncated prefix fits inside its own fractional budget`);
+  }
 });
 
 test("stream renders active wires through cached curves, tighter secondary pulses on crowded stages", async () => {
@@ -687,7 +714,11 @@ test("stream renders active wires through cached curves, tighter secondary pulse
     { key: "anyrouter", name: "AnyRouter", model: "claude-fable-5-2" },
     { key: "devin", name: "Devin", model: "swe-2" },
   ];
-  const pairs = [["claude", "anthropic"], ["codex", "openai"], ["pi", "anyrouter"], ["pig", "devin"]];
+  // pig -> anthropic is deliberately CROSSED (agent row 3, account row 0):
+  // a same-row wire is drawn as one straight line_to, but a cross-line wire
+  // exercises the cubic-bezier branch of makeCurve, which is what the cold /
+  // hot frame geometry assertions below need.
+  const pairs = [["claude", "anthropic"], ["codex", "openai"], ["pi", "anyrouter"], ["pig", "anthropic"]];
   pairs.forEach(([a, k], i) => o.routes.set(i + 1, {
     id: i + 1,
     agent: a,
@@ -704,6 +735,27 @@ test("stream renders active wires through cached curves, tighter secondary pulse
   }
 
   const realNow = Date.now;
+  // the cross-line wire's two static pieces: the glow at width 3.5 and the
+  // core at width 1.25, both full curves from the agent port (x0, y0) to the
+  // account dot (x3, y3) with y0 !== y3 — the cubic-bezier branch.
+  const crossC = o.curveBetween(o.agentIndex("pig"), o.acctIndex("anthropic"));
+  assert.notEqual(crossC, null, "the crossed pair has a curve");
+  assert.notEqual(crossC.y0, crossC.y3, "the crossed pair's endpoints are on different rows");
+  const staticWidths = [3.5, 1.25];
+  // static pieces of the crossed wire in a window of the PathBuilder log:
+  // same start, same end, one of the static widths, and more than a bare
+  // move+line (the cubic carries two control points)
+  const crossStatics = (from, to) => m.paths.slice(from, to).filter((p) =>
+    staticWidths.includes(p.width) &&
+    p.ops.length >= 2 &&
+    p.ops[0][0] === "move_to" &&
+    Math.abs(p.ops[0][1] - crossC.x0) < 0.05 &&
+    Math.abs(p.ops[0][2] - crossC.y0) < 0.05 &&
+    // gpui's cubic_bezier_to takes the END point first and the control
+    // points after it, so the endpoint of the last op is always its first
+    // coordinate pair, whatever the op kind
+    Math.abs(p.ops.at(-1)[1] - crossC.x3) < 0.05 &&
+    Math.abs(p.ops.at(-1)[2] - crossC.y3) < 0.05);
   try {
     // Curve/flatten caches: the first render tessellates each wire once,
     // the second render at the same geometry paints fully from cache.
@@ -711,12 +763,64 @@ test("stream renders active wires through cached curves, tighter secondary pulse
     const origFlat = o.flat.bind(o);
     o.flat = (...a) => { flatCalls++; return origFlat(...a); };
     Date.now = () => 500;
+    const mark1 = m.paths.length;
     const tree1 = o.render(m.cx);
+    const coldMark = m.paths.length;
     const firstPass = flatCalls;
     const tree2 = o.render(m.cx);
+    const hotMark = m.paths.length;
     assert.equal(flatCalls - firstPass, 0, "second render tessellates zero wires: getFlat serves the cache");
     assert.ok(o._flatCache.size > 0 && o._curveCache.size > 0, "polyline and path caches are populated");
     assert.equal(nodeCount(tree2), nodeCount(tree1), "cached paint output is identical to the uncached one");
+
+    // Cold frame: the crossed wire's glow and core were built exactly once
+    // each, as real cubics ending at the account dot.
+    const coldStatics = crossStatics(mark1, coldMark);
+    assert.equal(coldStatics.filter((p) => p.width === 3.5).length, 1, "cold frame builds the crossed glow once");
+    assert.equal(coldStatics.filter((p) => p.width === 1.25).length, 1, "cold frame builds the crossed core once");
+    for (const p of coldStatics) {
+      assert.ok(p.ops.some(([op]) => op === "cubic_bezier_to"), "a cross-line wire is drawn as a cubic, not a line");
+    }
+    // Hot frame at the same geometry: NOT ONE static piece of the crossed
+    // wire is rebuilt — the cache served the exact same curve.
+    const hotStatics = crossStatics(coldMark, hotMark);
+    assert.equal(hotStatics.length, 0, "hot frame rebuilds no static curve of the crossed wire: makeCurve's cache hit is real");
+
+    // And what paint_path actually received, in both frames, is the same
+    // geometry: identical endpoints and widths for both static pieces.
+    const paintedOf = (tree) => {
+      const found = [];
+      const seen = new Set();
+      const walk = (v) => {
+        if (v == null || typeof v !== "object" && typeof v !== "function") return;
+        if (Array.isArray(v)) { v.forEach(walk); return; }
+        const n = v.__node;
+        if (!n || seen.has(n)) return;
+        seen.add(n);
+        if (n.paintPath?.__path && staticWidths.includes(n.paintPath.__path.width)) {
+          const ops = n.paintPath.__path.ops;
+          if (ops.length >= 2 &&
+            Math.abs(ops[0][1] - crossC.x0) < 0.05 && Math.abs(ops[0][2] - crossC.y0) < 0.05 &&
+            Math.abs(ops.at(-1)[1] - crossC.x3) < 0.05 && Math.abs(ops.at(-1)[2] - crossC.y3) < 0.05) {
+            found.push({ width: n.paintPath.__path.width, ops: ops.map((o) => [...o]) });
+          }
+        }
+        n.kids.forEach(walk);
+      };
+      walk(tree);
+      return found.sort((a, b) => b.width - a.width);
+    };
+    const coldPainted = paintedOf(tree1);
+    const hotPainted = paintedOf(tree2);
+    assert.equal(coldPainted.length, 2, "paint_path received exactly the glow and the core of the crossed wire in the cold frame");
+    assert.deepEqual(hotPainted, coldPainted,
+      "hot frame paints the crossed wire with endpoints, control points and widths byte-identical to the cold frame");
+    // the endpoint coordinates themselves, for the record: the wire leaves
+    // the pig port at row 3 and lands on the anthropic dot at row 0
+    for (const p of coldPainted) {
+      assert.ok(Math.abs(p.ops[0][2] - crossC.y0) < 0.05, "the painted curve starts at the agent's port height");
+      assert.ok(Math.abs(p.ops.at(-1)[2] - crossC.y3) < 0.05, "the painted curve ends at the account's dot height");
+    }
 
     for (const [a, k] of pairs) {
       assert.notEqual(find(tree1, `wire-core-${a}-${k}`), null, `${a} -> ${k} stream wire is drawn`);

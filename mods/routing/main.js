@@ -1120,8 +1120,12 @@ export default class Routing extends View {
     for (let i = 0; i < str.length; i++) {
       const c = str.charCodeAt(i);
       // a surrogate pair is one astral code point, counted once as wide
-      // (for..of iteration semantics), the trailing half skipped here
-      if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) { w += px * 1.00; i++; continue; }
+      // (for..of iteration semantics); only a real pair skips the trailing
+      // half — a lone high surrogate must not swallow the code unit after it
+      if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
+        const lo = str.charCodeAt(i + 1);
+        if (lo >= 0xdc00 && lo <= 0xdfff) { w += px * 1.00; i++; continue; }
+      }
       if (c > 255) { w += px * 1.00; continue; }
       const ch = str[i];
       if (ch === "m" || ch === "w") w += px * 0.80;
@@ -1151,7 +1155,10 @@ export default class Routing extends View {
     s = String(s || "");
     if (!s || budget <= 0) return "";
     const cache = this._fitCache;
-    const key = cache ? `${px}|${bold ? 1 : 0}|${Math.round(budget)}|${s}` : "";
+    // estTextW always answers an integer, so a fractional budget below X
+    // truncates exactly like floor(X): the cache key is the floor, never the
+    // round — rounding 26.8 up to 27 would serve a too-long cached answer.
+    const key = cache ? `${px}|${bold ? 1 : 0}|${Math.floor(budget)}|${s}` : "";
     if (cache) {
       const hit = cache.get(key);
       if (hit !== undefined) return hit;

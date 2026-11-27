@@ -24,4 +24,4 @@
   - 门禁里的 `herdr-app check` 在没有安装 Herdr 的机器上会被跳过并在末行注明；发版前须在装有 Herdr 的机器上至少完整通过一次。
   - 改动 `mods/routing/main.js` 的行为时，同一提交里补上或更新 `tests/` 中对应的测试（见 `tests/README.md`）。
 - 面板内的一键更新依赖发布产物的形状，以下任一项不满足都会让所有用户的更新按钮失效：`mods/routing/VERSION` 必须与根目录 `VERSION` 相同并随发布提交入库；每个 Release 必须上传 `herdr-magpie-X.Y.Z.tar.gz`（`git archive --prefix=herdr-magpie-X.Y.Z/` 自 Tag 生成）及同名 `.sha256`；Tag 必须是 `vX.Y.Z`；Release 不得为 draft 或 prerelease（更新检查读取 `releases/latest`）。
-- 一行式安装命令（`curl -fsSL https://dorokuma.github.io/hm | bash` / `irm https://dorokuma.github.io/hm.ps1 | iex`）经 `releases/latest/download/` 抓取安装脚本，因此每个 Release 还必须上传与发布提交逐字节一致的 `install.sh` 与 `install.ps1`；门禁 `--out` 会把这两个文件连同 tarball 和 `.sha256` 一并给出，`--published` 会核对它们与 HEAD 逐字节一致。
+- 一行式安装命令（`curl -fsSL https://dorokuma.github.io/hm | bash` / `irm https://dorokuma.github.io/hm.ps1 | iex`）经 `releases/latest/download/` 抓取安装脚本，因此每个 Release 还必须上传与发布提交逐字节一致的 `install.sh` 与 `install.ps1`；门禁 `--out` 导出的是 `HEAD` 提交里的这两个文件（连同 tarball 和 `.sha256`），`--published` 核对的则是对应 **tag** 提交（`TAGC`）里的字节——发布时二者必须是同一个提交。

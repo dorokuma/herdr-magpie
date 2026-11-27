@@ -9,22 +9,63 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { loadMod, realExec, oldInstall, releasedMods, stubHerdrApp, tmpdir, ROOT } from "../harness.mjs";
+import { loadMod, realExec, oldInstall, releasedMods, stubHerdrApp, tmpdir, ROOT, REPO } from "../harness.mjs";
 
 const V = process.env.HM_PUBLISHED || "";
 const skip = V ? false : "set HM_PUBLISHED=X.Y.Z (scripts/release-check.sh --published does)";
 
 // The child processes this file spawns run real downloads from the network.
-// They get an environment with the common credential variables stripped out:
-// a token handed to a subprocess (and to every server its downloads touch)
-// is a token leaked. Everything needed to reach GitHub -- PATH, HOME,
-// proxies, certificate authorities -- stays.
+// They get a whitelist environment: a blacklist can only ever name the
+// credential variables someone thought of today, while a token handed to a
+// subprocess (and to every server its downloads touch) is a token leaked.
+// Only what a download needs survives: PATH, HOME, the locale and the shell,
+// HTTP proxies in both casings, and the certificate-authority overrides curl
+// and node read. HERDR_MAGPIE_RELEASE_BASE and HERDR_MAGPIE_VERSION must
+// never leak in either: they re-point the installer at a stand-in server,
+// and this file's whole point is exercising the real one.
+const ENV_KEEP = new Set([
+  "PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "SHELL", "TERM", "LANG",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+]);
+const ENV_PROXY = /^(https?|all|no)_proxy$/i;
+const ENV_LOCALE = /^LC_/;
 function cleanEnv(extra = {}) {
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) {
-    if (/(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTH)$/.test(k) || /^CI_/.test(k)) delete env[k];
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (ENV_KEEP.has(k) || ENV_PROXY.test(k) || ENV_LOCALE.test(k)) env[k] = v;
   }
+  delete env.HERDR_MAGPIE_RELEASE_BASE;
+  delete env.HERDR_MAGPIE_VERSION;
   return Object.assign(env, extra);
+}
+
+// One curl at a redirect script behind dorokuma.github.io, retried like the
+// other network calls here. Returns the response body with the HTTP status
+// line already cut off.
+function fetchHop(url) {
+  let r;
+  for (let i = 0; i < 3; i++) {
+    r = spawnSync("curl", ["-sSL", "--max-time", "30", "-w", "\n%{http_code}", url], { encoding: "utf8", env: cleanEnv() });
+    if (r.status === 0) break;
+  }
+  assert.equal(r.status, 0, `curl reached ${url}: ${r.stderr}`);
+  assert.ok(r.stdout.endsWith("\n200"), `${url} answers HTTP 200, got the tail ${JSON.stringify(r.stdout.slice(-40))}`);
+  return r.stdout.slice(0, -4);
+}
+
+// The redirect script must be exactly that: a tiny script that downloads and
+// runs the installer asset of THIS repository's latest release. The full URL
+// is matched, the rest of the body must not point anywhere else (no other
+// repository, no second download address), and nothing may pin a version --
+// a comment page or a hijacked redirect is a failed check, never something
+// the test then executes.
+function assertRedirectScript(body, asset, label) {
+  const want = `https://github.com/${REPO}/releases/latest/download/${asset}`;
+  assert.ok(body.includes(want), `${label} hands off to the exact ${asset} asset of this repository's latest release`);
+  assert.ok(!/herdr-magpie-\d+\.\d+\.\d+/.test(body), `${label} pins no version`);
+  const downloads = [...body.matchAll(/https?:\/\/[^\s"'|<>&]+/g)].map((m) => m[0]);
+  assert.deepEqual(downloads, [want], `${label} downloads from nowhere but the one asset URL`);
+  assert.ok(/\|\s*(bash|iex)\b/.test(body), `${label} is an executable hand-off (a pipe into the shell), not a comment page`);
 }
 const num = (v) => v.split(".").map(Number);
 const older = (a, b) => { const x = num(a), y = num(b); return (x[0] - y[0] || x[1] - y[1] || x[2] - y[2]) < 0; };
@@ -74,17 +115,22 @@ test(`the README's no-clone install lines install ${V}`, { skip }, () => {
   const en = pasted("README.md"), zh = pasted("README.zh-CN.md");
   assert.equal(en.length, 1, "README.md has one block that resolves releases/latest");
   assert.deepEqual(zh, en, "README.zh-CN.md gives the same lines");
+  assert.ok(en[0].includes("https://dorokuma.github.io/hm"), "the README line goes through the hm redirect");
+
+  // The redirect script is fetched and audited BEFORE anything executes:
+  // only bytes verified to be the tiny hand-off to this repository's own
+  // install.sh asset are piped into bash -- never unaudited remote ones.
+  const hm = fetchHop("https://dorokuma.github.io/hm");
+  assertRedirectScript(hm, "install.sh", "the hm redirect script");
 
   const home = tmpdir("home");
   const stub = stubHerdrApp();
-  // the line pipes install.sh into bash; the script's own trap removes the
-  // temporary folder the bootstrap downloads into, however it ends
+  // the verified redirect bytes are piped into bash exactly the way the
+  // README line does; the script's own trap removes the temporary folder
+  // the bootstrap downloads into, however it ends
   let r;
   for (let i = 0; i < 3; i++) {
-    // pipefail: the README line is a pipe (curl | bash), and without it a
-    // curl that dies before writing a byte would be swallowed into exit 0
-    // by an empty bash, passing a test that installed nothing
-    r = spawnSync("bash", ["-c", `set -o pipefail;\n${en[0]}`], { encoding: "utf8", env: cleanEnv({ PATH: stub.PATH, HERDR_APP_HOME: home }) });
+    r = spawnSync("bash", [], { input: hm, encoding: "utf8", env: cleanEnv({ PATH: stub.PATH, HERDR_APP_HOME: home }) });
     if (r.status === 0) break;
   }
   assert.equal(r.status, 0, r.stderr);
@@ -114,14 +160,6 @@ test("the READMEs' PowerShell install block is one and the same in both language
 // install.ps1 asset of releases/latest, or every Windows install line is
 // dead no matter how good the release is.
 test("https://dorokuma.github.io/hm.ps1 answers 200 and hands off to the install.ps1 asset", { skip }, () => {
-  let r;
-  for (let i = 0; i < 3; i++) {
-    r = spawnSync("curl", ["-sSL", "--max-time", "30", "-w", "\n%{http_code}", "https://dorokuma.github.io/hm.ps1"], { encoding: "utf8", env: cleanEnv() });
-    if (r.status === 0) break;
-  }
-  assert.equal(r.status, 0, `curl reached hm.ps1: ${r.stderr}`);
-  assert.ok(r.stdout.endsWith("\n200"), `hm.ps1 answers HTTP 200, got the tail ${JSON.stringify(r.stdout.slice(-40))}`);
-  const body = r.stdout.slice(0, -4);
-  assert.ok(body.includes("releases/latest/download/install.ps1"), "the redirect script hands off to the install.ps1 asset of releases/latest");
-  assert.ok(!/herdr-magpie-\d+\.\d+\.\d+/.test(body), "no version is pinned into the redirect script");
+  const body = fetchHop("https://dorokuma.github.io/hm.ps1");
+  assertRedirectScript(body, "install.ps1", "the hm.ps1 redirect script");
 });
