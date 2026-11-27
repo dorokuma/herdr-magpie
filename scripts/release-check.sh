@@ -113,6 +113,19 @@ if [ "$MODE" = published ]; then
   U="https://github.com/$REPO/releases/download/v$V/$A"
   if retry curl -fsSL --max-time 120 -o "$WORK/$A" "$U" 2>/dev/null && retry curl -fsSL --max-time 30 -o "$WORK/$A.sha256" "$U.sha256" 2>/dev/null; then
     ok "the release carries $A and $A.sha256"
+    # the one-line installers are release assets of their own: without them
+    # curl -fsSL https://dorokuma.github.io/hm | bash has nothing to fetch
+    for I in install.sh install.ps1; do
+      if retry curl -fsSL --max-time 30 -o "$WORK/dl-$I" "https://github.com/$REPO/releases/download/v$V/$I" 2>/dev/null; then
+        if git cat-file -p "HEAD:$I" > "$WORK/head-$I" 2>/dev/null && cmp -s "$WORK/dl-$I" "$WORK/head-$I"; then
+          ok "the release carries $I, byte for byte the one at HEAD"
+        else
+          bad "the release carries $I, byte for byte the one at HEAD" "the published asset differs from what is at HEAD (the release commit)"
+        fi
+      else
+        bad "the release carries $I, byte for byte the one at HEAD" "could not download https://github.com/$REPO/releases/download/v$V/$I" "without it, the one-line installer has nothing to fetch"
+      fi
+    done
     WANT=$(cut -d' ' -f1 < "$WORK/$A.sha256")
     if [ -n "$WANT" ] && [ "$WANT" = "$(sha "$WORK/$A")" ]; then ok "the archive matches its .sha256"; else bad "the archive matches its .sha256" "published $WANT" "actual    $(sha "$WORK/$A")"; fi
     mkdir -p "$WORK/got" "$WORK/want"
@@ -233,8 +246,8 @@ else
 fi
 
 if [ -n "$OUT" ] && [ "$fail" -eq 0 ]; then
-  mkdir -p "$OUT" && cp "$WORK/$A" "$WORK/$A.sha256" "$OUT/"
-  printf '\nLeft in %s:\n  %s\n  %s\n' "$OUT" "$A" "$A.sha256"
+  mkdir -p "$OUT" && cp "$WORK/$A" "$WORK/$A.sha256" install.sh install.ps1 "$OUT/"
+  printf '\nLeft in %s:\n  %s\n  %s\n  %s\n  %s\n' "$OUT" "$A" "$A.sha256" install.sh install.ps1
 fi
 
 case "$STATE" in

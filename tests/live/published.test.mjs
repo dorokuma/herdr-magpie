@@ -46,10 +46,11 @@ test(`the pill takes the previous release to ${V}, over the network`, { skip }, 
   assert.deepEqual(m.notes.map((n) => [n.level, n.body]), [["success", `${prev.version} → ${V}`]]);
 });
 
-// the lines a person on an install too old to have the pill is told to paste
+// the lines a person on an install too old to have the pill is told to paste:
+// the one-line installer, which fetches install.sh from releases/latest
 const pasted = (file) => {
   const blocks = [...fs.readFileSync(path.join(ROOT, file), "utf8").matchAll(/```bash\n([\s\S]*?)```/g)].map((b) => b[1]);
-  return blocks.filter((b) => b.includes("releases/latest"));
+  return blocks.filter((b) => b.includes("dorokuma.github.io/hm"));
 };
 
 test(`the README's no-clone install lines install ${V}`, { skip }, () => {
@@ -59,11 +60,11 @@ test(`the README's no-clone install lines install ${V}`, { skip }, () => {
 
   const home = tmpdir("home");
   const stub = stubHerdrApp();
-  // the block is a subshell whose own trap removes the temporary folder it
-  // made, however it ends; nothing of /tmp is swept here
+  // the line pipes install.sh into bash; the script's own trap removes the
+  // temporary folder the bootstrap downloads into, however it ends
   let r;
   for (let i = 0; i < 3; i++) {
-    r = spawnSync("sh", ["-c", en[0]], { encoding: "utf8", env: { ...process.env, PATH: stub.PATH, HERDR_APP_HOME: home } });
+    r = spawnSync("bash", ["-c", en[0]], { encoding: "utf8", env: { ...process.env, PATH: stub.PATH, HERDR_APP_HOME: home } });
     if (r.status === 0) break;
   }
   assert.equal(r.status, 0, r.stderr);
@@ -76,7 +77,7 @@ test(`the README's no-clone install lines install ${V}`, { skip }, () => {
 // the release contract -- both READMEs must carry the same one block.
 const pastedPs = (file) => {
   const blocks = [...fs.readFileSync(path.join(ROOT, file), "utf8").matchAll(/```powershell\n([\s\S]*?)```/g)].map((b) => b[1]);
-  return blocks.filter((b) => b.includes("releases/latest") && b.includes("install.ps1"));
+  return blocks.filter((b) => b.includes("dorokuma.github.io/hm.ps1"));
 };
 
 test("the READMEs' PowerShell install block is one and the same in both languages", { skip }, () => {

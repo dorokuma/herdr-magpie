@@ -17,10 +17,11 @@
 ### Repository-specific release contract
 
 - 本仓的 layout、routing mod 与 tabs-routing mod 必须以同一版本发布；Release Notes 必须列出布局/模组变化及安装、升级方式。
-- 版本号只写在三处：根目录 `VERSION`、`mods/routing/VERSION`、`CHANGELOG.md`。README 的徽章与安装命令读取 `releases/latest`，不得写入具体版本号；发版时只改这三处。仅修改 README/RECIPE 等文档或 `tests/`、`scripts/`，不改变任何被安装文件（`mods/`、`layouts/`、`install.sh`）时不发新版本，记入 CHANGELOG 的 `[Unreleased]`，随下一个版本一并发布；门禁对此会报 `NOTHING TO DO`。
+- 版本号只写在三处：根目录 `VERSION`、`mods/routing/VERSION`、`CHANGELOG.md`。README 的徽章与安装命令读取 `releases/latest`，不得写入具体版本号；发版时只改这三处。仅修改 README/RECIPE 等文档或 `tests/`、`scripts/`，不改变任何被安装文件（`mods/`、`layouts/`、`install.sh`、`install.ps1`）时不发新版本，记入 CHANGELOG 的 `[Unreleased]`，随下一个版本一并发布；门禁对此会报 `NOTHING TO DO`。
 - 本仓的发布门禁是 `scripts/release-check.sh`，必须原样通过，不得绕过：
   - 打 Tag 前在发布提交上运行 `scripts/release-check.sh --out <目录>`，末行须为 `READY`；`<目录>` 里的 `herdr-magpie-X.Y.Z.tar.gz` 与 `.sha256` 就是要上传的 Release assets，不要另行打包。
   - 创建 GitHub Release 后运行 `scripts/release-check.sh --published`，末行须为 `PUBLISHED`。它核对 Tag、`origin/main`、`releases/latest`、发布包与校验和，并用上一个版本的更新器经真实网络装到新版本。
   - 门禁里的 `herdr-app check` 在没有安装 Herdr 的机器上会被跳过并在末行注明；发版前须在装有 Herdr 的机器上至少完整通过一次。
   - 改动 `mods/routing/main.js` 的行为时，同一提交里补上或更新 `tests/` 中对应的测试（见 `tests/README.md`）。
 - 面板内的一键更新依赖发布产物的形状，以下任一项不满足都会让所有用户的更新按钮失效：`mods/routing/VERSION` 必须与根目录 `VERSION` 相同并随发布提交入库；每个 Release 必须上传 `herdr-magpie-X.Y.Z.tar.gz`（`git archive --prefix=herdr-magpie-X.Y.Z/` 自 Tag 生成）及同名 `.sha256`；Tag 必须是 `vX.Y.Z`；Release 不得为 draft 或 prerelease（更新检查读取 `releases/latest`）。
+- 一行式安装命令（`curl -fsSL https://dorokuma.github.io/hm | bash` / `irm https://dorokuma.github.io/hm.ps1 | iex`）经 `releases/latest/download/` 抓取安装脚本，因此每个 Release 还必须上传与发布提交逐字节一致的 `install.sh` 与 `install.ps1`；门禁 `--out` 会把这两个文件连同 tarball 和 `.sha256` 一并给出，`--published` 会核对它们与 HEAD 逐字节一致。

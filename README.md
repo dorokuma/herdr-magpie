@@ -52,42 +52,14 @@ You need [Herdr](https://herdr.dev) and a Magpie gateway on `127.0.0.1:3425` —
 **macOS / Linux** — paste into a terminal:
 
 ```bash
-(
-  set -e
-  V=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/dorokuma/herdr-magpie/releases/latest | sed 's|.*/v||')
-  T=$(mktemp -d)
-  trap 'rm -rf "$T"' EXIT
-  curl -fsSL "https://github.com/dorokuma/herdr-magpie/releases/download/v$V/herdr-magpie-$V.tar.gz" | tar xz -C "$T"
-  "$T/herdr-magpie-$V/install.sh"
-)
+curl -fsSL https://dorokuma.github.io/hm | bash
 ```
 
 **Windows** — paste into PowerShell (native Windows PowerShell, not WSL):
 
 ```powershell
-& {
-  $ErrorActionPreference = 'Stop'
-  $Curl = "$env:SystemRoot\System32\curl.exe"
-  $Tar = "$env:SystemRoot\System32\tar.exe"
-  $Url = & $Curl -fsSLI -o NUL -w '%{url_effective}' https://github.com/dorokuma/herdr-magpie/releases/latest
-  if ($LASTEXITCODE -ne 0) { throw "curl failed (exit $LASTEXITCODE)" }
-  $V = ([string]$Url) -replace '.*/v', ''
-  if ([string]::IsNullOrWhiteSpace($V)) { throw 'could not resolve the latest release version' }
-  $T = Join-Path $env:TEMP ("herdr-magpie-" + [Guid]::NewGuid().ToString('N'))
-  New-Item -ItemType Directory -Force -Path $T | Out-Null
-  try {
-    & $Curl -fsSL "https://github.com/dorokuma/herdr-magpie/releases/download/v$V/herdr-magpie-$V.tar.gz" -o "$T\pkg.tgz"
-    if ($LASTEXITCODE -ne 0) { throw "curl failed (exit $LASTEXITCODE)" }
-    & $Tar xzf "$T\pkg.tgz" -C $T
-    if ($LASTEXITCODE -ne 0) { throw "tar failed (exit $LASTEXITCODE)" }
-    & "$T\herdr-magpie-$V\install.ps1"
-  } finally {
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath $T
-  }
-}
+irm https://dorokuma.github.io/hm.ps1 | iex
 ```
-
-If your PowerShell execution policy is `Restricted`, allow local scripts first, e.g. `Set-ExecutionPolicy -Scope Process RemoteSigned`.
 
 Prefer a clone instead? See [What's Included & Local Development](#whats-included--local-development).
 

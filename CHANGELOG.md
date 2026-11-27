@@ -9,6 +9,19 @@ together at one version.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-27
+
+### Added
+
+- One-line install: `curl -fsSL https://dorokuma.github.io/hm | bash` on macOS / Linux and `irm https://dorokuma.github.io/hm.ps1 | iex` on Windows. Both installers are now dual-mode: run from a clone or an unpacked release they install the tree they sit in; piped into a shell they bootstrap themselves by downloading the release archive, verifying its SHA-256 against the published `.sha256` before anything is unpacked or the install directory is touched. `HERDR_MAGPIE_RELEASE_BASE` and `HERDR_MAGPIE_VERSION` override the release server and the version.
+
+### Changed
+
+- `install.sh` resolves the latest release and downloads the archive itself in remote mode (3 retries), verifies the checksum with `sha256sum` / `shasum -a 256`, and aborts before unpacking on any mismatch; the piped-into-bash invocation no longer fails on an unset `BASH_SOURCE`.
+- `install.ps1` downloads with `System32\curl.exe` and unpacks with `System32\tar.exe` in remote mode, verifies the archive with `Get-FileHash -Algorithm SHA256`, and performs the install in the same script instead of launching a downloaded `.ps1`, so it runs unblocked under the default `Restricted` execution policy via `irm | iex`. The script body no longer ends in a bare `exit`, which would have closed the host PowerShell window inside `iex`.
+- `scripts/release-check.sh` now ships `install.sh` and `install.ps1` as release assets (`--out`) and verifies the published ones byte for byte against HEAD (`--published`).
+- The Quick Start sections of both READMEs use the one-line installers; the PowerShell execution-policy hint is gone because `irm | iex` needs none.
+
 ## [0.6.0] - 2026-11-27
 
 ### Added

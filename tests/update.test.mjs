@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import {
   loadMod, storage, offlineExec, fakeRelease, packTree, treeVersion, oldInstall,
   releasedMods, stubHerdrApp, sha256, tmpdir, MAIN, REPO, ROOT,
@@ -336,6 +337,109 @@ test("install.sh never copies a source mods/routing/config.json over the install
   assert.ok(fs.existsSync(path.join(target, "config.example.json")), "config.example.json is installed");
 });
 
+// --- install.sh, piped into bash: the one-line installer ---------------------
+// There is no tree beside the script then, so it bootstraps itself: resolve
+// the latest release, download the archive, verify its sha256, and only then
+// install. "GitHub" is a folder again, served by a curl stand-in: the real
+// download flags (-o, -w, --max-time) are parsed the way curl itself reads
+// them, and anything not pointing at the stand-in's release base fails.
+
+function stubCurl() {
+  const bin = tmpdir("bin");
+  fs.writeFileSync(path.join(bin, "curl"), `#!/bin/sh
+out=""; writefmt=""; url=""; i=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--output) shift; out="$1" ;;
+    -w|--write-out) shift; writefmt="$1" ;;
+    --max-time) shift ;;
+    -*) ;;
+    *) url="$1" ;;
+  esac
+  shift
+done
+case "$url" in
+  */latest)
+    base="\${url%/latest}"
+    if [ -n "$writefmt" ]; then printf '%s' "$base/tag/v\${STUB_VERSION:-0.0.0}"; fi
+    exit 0 ;;
+esac
+case "$url" in
+  file://*) ;;
+  *) echo "curl: (6) no such host" >&2; exit 6 ;;
+esac
+if [ -z "$out" ]; then echo "curl: (3) no output file" >&2; exit 3; fi
+# the GitHub download URL shape, mapped onto the flat release folder the
+# harness packs: <base>/download/vX.Y.Z/<file> is <base>/<file>
+case "$url" in
+  */download/v*/*) url="\${url%%/download/v*/*}/\${url##*/}" ;;
+esac
+src="\${url#file://}"
+if [ -f "$src" ]; then cp "$src" "$out"; exit 0; fi
+echo "curl: (22) not found: $url" >&2
+exit 22
+`, { mode: 0o755 });
+  return `${bin}${path.delimiter}${process.env.PATH}`;
+}
+
+// the installer as a person pipes it: bash reads the script from stdin. The
+// checkout's install.sh is the script under test; the archive it downloads
+// is the packed tree in `dir`, found through HERDR_MAGPIE_RELEASE_BASE.
+function pipedInstall(dir, { home, version, env = {} } = {}) {
+  const stub = stubHerdrApp();
+  const r = spawnSync("bash", [], {
+    input: fs.readFileSync(path.join(ROOT, "install.sh"), "utf8"),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${stubCurl()}${path.delimiter}${stub.PATH}`,
+      HERDR_APP_HOME: home,
+      HERDR_MAGPIE_RELEASE_BASE: `${pathToFileURL(dir).href}`,
+      STUB_VERSION: version,
+      ...env,
+    },
+  });
+  return { ...r, stub };
+}
+
+test("install.sh, piped into bash, downloads, verifies and installs the release", () => {
+  const dir = packTree();
+  const home = tmpdir("home");
+  const r = pipedInstall(dir, { home, version: V });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes("Installed herdr-magpie"), "the install completed");
+  assert.equal(fs.readFileSync(path.join(home, "mods/routing/VERSION"), "utf8").trim(), V);
+  assert.equal(sha256(path.join(home, "mods/routing/main.js")), sha256(MAIN), "main.js is the release's, byte for byte");
+  for (const f of ["mods/tabs-routing/main.js", "layouts/Magpie.json"]) {
+    assert.ok(fs.existsSync(path.join(home, f)), `${f} laid down`);
+  }
+  assert.deepEqual(r.stub.calls(), [
+    `check ${home}/mods/routing`, `check ${home}/mods/tabs-routing`, 'do layout.switch {"name":"Magpie"}',
+  ], "then checks both mods and switches to the layout, as the local install does");
+
+  // a second run over an install that has been configured keeps the person's
+  // config.json, the same rule the local install follows
+  fs.writeFileSync(path.join(home, "mods/routing/config.json"), '{"mine":true}');
+  const r2 = pipedInstall(dir, { home, version: V });
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.equal(fs.readFileSync(path.join(home, "mods/routing/config.json"), "utf8"), '{"mine":true}', "config.json survives the bootstrap install");
+});
+
+test("install.sh, piped into bash, refuses an archive that fails its sha256 and writes nothing", () => {
+  // the archive itself is left intact: only the checksum beside it lies
+  const goodDir = packTree();
+  const dir = tmpdir("rel");
+  for (const f of fs.readdirSync(goodDir)) fs.copyFileSync(path.join(goodDir, f), path.join(dir, f));
+  fs.writeFileSync(path.join(dir, `herdr-magpie-${V}.tar.gz.sha256`), `${"0".repeat(64)}  herdr-magpie-${V}.tar.gz\n`);
+
+  const home = tmpdir("home");
+  const r = pipedInstall(dir, { home, version: V });
+  assert.notEqual(r.status, 0, "the checksum mismatch is fatal");
+  assert.match(r.stderr, /checksum mismatch/, "the refusal says why");
+  assert.ok(!r.stdout.includes("Installed herdr-magpie"), "the install did not complete");
+  assert.deepEqual(fs.readdirSync(home), [], "nothing was written into HERDR_APP_HOME: the checksum gates the install");
+});
+
 // --- Windows: the platform the panel runs on -----------------------------------
 // herdr's window() answers the platform; the harness hands it in. On Windows
 // there is no /bin/sh and no /dev/null, so the mod phrases its probes and its
@@ -499,10 +603,29 @@ test("install.ps1, the Windows installer, never poisons a successful install's e
     "both herdr-app checks throw on a non-zero exit");
   assert.ok(/try \{[\s\S]*layout\.switch[\s\S]*\} catch \{ \}/.test(ps1), "layout.switch is best-effort");
   // a successful install ends 0 even when that best-effort switch exited
-  // non-zero: the script's own exit, right after the success line, is what
-  // the caller reads, not a leftover $LASTEXITCODE
-  assert.ok(/Write-Output "Installed herdr-magpie into \$HerdrHome"[\s\S]*\nexit 0\s*$/.test(ps1),
-    "the script ends in an explicit exit 0");
+  // non-zero. But a bare `exit` inside `irm ... | iex` would terminate the
+  // person's own PowerShell window, so the script body is one script block
+  // that resets the leftover exit code and returns instead: no line of the
+  // script may call exit at all
+  assert.ok(!/^\s*exit\b/m.test(ps1), "no bare exit anywhere: inside irm | iex it would close the host PowerShell window");
+  assert.ok(/^& \{/m.test(ps1), "the body is a single script block, so a throw inside iex stays in iex");
+  assert.ok(/Write-Output "Installed herdr-magpie into \$HerdrHome"[\s\S]*\$global:LASTEXITCODE = 0\s*\n\s*return\s*\n\}\s*$/.test(ps1),
+    "the script ends by resetting the leftover native exit code and returning, not by exiting");
+  // the dual-mode bootstrap: beside a tree it installs what it sits in
+  // ($InstallerScriptRoot, captured from $PSScriptRoot before the wrapper);
+  // piped into iex it downloads the release itself, verifies it and unpacks
+  // it with the System32 curl.exe and tar.exe the updater also uses
+  assert.ok(ps1.includes("$InstallerScriptRoot = $PSScriptRoot"), "the script's own folder is captured before the wrapper");
+  assert.ok(ps1.includes("Join-Path $InstallerScriptRoot 'mods\\routing'"), "local mode probes the tree beside the script");
+  assert.ok(ps1.includes("$env:HERDR_MAGPIE_RELEASE_BASE"), "the release server can be overridden");
+  assert.ok(ps1.includes("$env:HERDR_MAGPIE_VERSION"), "the version can be pinned");
+  assert.ok(ps1.includes("System32\\curl.exe"), "downloads use the System32 curl.exe");
+  assert.ok(ps1.includes("System32\\tar.exe"), "unpacking uses the System32 tar.exe");
+  assert.ok(ps1.includes("Get-FileHash -Algorithm SHA256 -LiteralPath"), "the archive is verified with Get-FileHash before anything is installed");
+  assert.ok(/for \(\$n = 0; \$n -lt 3; \$n\+\+\)/.test(ps1), "the download retries three times");
+  assert.ok(/throw "install\.ps1: checksum mismatch/.test(ps1), "a checksum mismatch throws before anything is unpacked or installed");
+  assert.ok(ps1.includes("} finally {"), "the temporary folder is cleaned in finally");
+  assert.ok(!ps1.includes("herdr-magpie-$V\\install.ps1"), "the downloaded .ps1 is never launched: it would not run under the Restricted policy irm | iex works around");
   // Legacy argument passing is the default before PowerShell 7.3, where the
   // PSNativeCommandArgumentPassing variable does not exist at all: a missing
   // variable must read as Legacy, not as a modern pass-through
@@ -520,6 +643,7 @@ test("install.ps1, the Windows installer, never poisons a successful install's e
   // same rule the updater's copy follows
   assert.ok(/Get-ChildItem -LiteralPath \(Join-Path \$SrcDir 'mods\\routing'\) -Force \| Where-Object \{ \$_\.Name -ne 'config\.json' \} \| ForEach-Object/.test(ps1),
     "the mods\\routing copy filters config.json out");
+  assert.ok(ps1.includes("-LiteralPath"), "file operations use -LiteralPath");
 });
 
 test("during herdr-app check window() is null: the mod constructs and is not Windows", async () => {
