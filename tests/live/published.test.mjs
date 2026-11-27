@@ -55,14 +55,16 @@ function fetchHop(url) {
 
 // The redirect script must be exactly that: the tiny template below, and
 // nothing else. The body is compared line by line against the exact hand-off
-// (CRLF vs LF line endings and stray outer whitespace are the only tolerated
-// differences -- a browser, a proxy or GitHub Pages may mangle those): every
-// other line, every extra statement, every extra download address or pinned
-// version fails the check. This is not pattern matching: one exact text is
-// the release contract the README one-liners stake their trust on, and a
-// hijacked or padded redirect is a failed check, never something the test
-// then executes.
-const linesOf = (text) => text.replace(/\r/g, "").split("\n").map((l) => l.trim()).filter(Boolean);
+// (a CRLF line ending is read as the LF it encodes and any trailing newline
+// is dropped -- a browser, a proxy or GitHub Pages may mangle those two):
+// every other difference, every extra statement, every extra download
+// address or pinned version fails the check. This is not pattern matching:
+// one exact text is the release contract the README one-liners stake their
+// trust on, and a hijacked or padded redirect is a failed check, never
+// something the test then executes. Inside the lines nothing is forgiven:
+// characters are compared as they came over the wire, whitespace included,
+// so a lone carriage return in the middle of a line fails the check.
+const linesOf = (text) => text.replace(/\r\n/g, "\n").replace(/\n+$/, "").split("\n");
 const REDIRECT_SH = [
   "#!/usr/bin/env bash",
   "set -euo pipefail",
@@ -167,13 +169,13 @@ test(`the one-line installer's verified installer bytes install ${V}`, { skip },
   const hm = fetchHop("https://dorokuma.github.io/hm");
   assertRedirectScript(hm, "install.sh", "the hm redirect script");
 
-  const dl = spawnSync("curl", ["-fsSL", "--max-time", "60", `https://github.com/${REPO}/releases/latest/download/install.sh`], { encoding: "utf8", env: cleanEnv(), maxBuffer: 8 << 20 });
+  const dl = spawnSync("curl", ["-fsSL", "--max-time", "60", `https://github.com/${REPO}/releases/latest/download/install.sh`], { encoding: null, env: cleanEnv(), maxBuffer: 8 << 20 });
   assert.equal(dl.status, 0, `install.sh asset of releases/latest downloaded: ${dl.stderr}`);
-  const tagged = spawnSync("git", ["-C", ROOT, "show", `v${V}:install.sh`], { encoding: "utf8", maxBuffer: 8 << 20 });
+  const tagged = spawnSync("git", ["-C", ROOT, "show", `v${V}:install.sh`], { encoding: null, maxBuffer: 8 << 20 });
   const reference = tagged.status === 0
     ? tagged.stdout
-    : fs.readFileSync(path.join(ROOT, "install.sh"), "utf8");
-  assert.equal(dl.stdout, reference,
+    : fs.readFileSync(path.join(ROOT, "install.sh"));
+  assert.ok(Buffer.isBuffer(dl.stdout) && dl.stdout.equals(reference),
     tagged.status === 0
       ? `the install.sh asset of releases/latest is byte for byte the one tagged v${V}`
       : `tag v${V} is not in this checkout, so the asset is checked against the repository's install.sh instead (git fetch --tags to pin it)`);
@@ -187,6 +189,8 @@ test(`the one-line installer's verified installer bytes install ${V}`, { skip },
   // ends
   let r;
   for (let i = 0; i < 3; i++) {
+    // input is the raw verified Buffer itself, never decoded and re-encoded
+    // through UTF-8 text: bash receives exactly the bytes the check approved
     r = spawnSync("bash", [], { input: verifiedInstaller, encoding: "utf8", env: cleanEnv({ PATH: stub.PATH, HERDR_APP_HOME: home }) });
     if (r.status === 0) break;
   }
