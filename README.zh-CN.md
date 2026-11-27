@@ -49,12 +49,49 @@
 
 ### 1. 安装
 
+**macOS / Linux** —— 在终端中粘贴：
+
 ```bash
-V=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/dorokuma/herdr-magpie/releases/latest | sed 's|.*/v||')
-curl -fsSL "https://github.com/dorokuma/herdr-magpie/releases/download/v$V/herdr-magpie-$V.tar.gz" | tar xz -C /tmp && "/tmp/herdr-magpie-$V/install.sh"
+(
+  set -e
+  V=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/dorokuma/herdr-magpie/releases/latest | sed 's|.*/v||')
+  T=$(mktemp -d)
+  trap 'rm -rf "$T"' EXIT
+  curl -fsSL "https://github.com/dorokuma/herdr-magpie/releases/download/v$V/herdr-magpie-$V.tar.gz" | tar xz -C "$T"
+  "$T/herdr-magpie-$V/install.sh"
+)
 ```
 
+**Windows** —— 在 PowerShell 中粘贴（Windows 原生 PowerShell，不是 WSL）：
+
+```powershell
+& {
+  $ErrorActionPreference = 'Stop'
+  $Curl = "$env:SystemRoot\System32\curl.exe"
+  $Tar = "$env:SystemRoot\System32\tar.exe"
+  $Url = & $Curl -fsSLI -o NUL -w '%{url_effective}' https://github.com/dorokuma/herdr-magpie/releases/latest
+  if ($LASTEXITCODE -ne 0) { throw "curl failed (exit $LASTEXITCODE)" }
+  $V = ([string]$Url) -replace '.*/v', ''
+  if ([string]::IsNullOrWhiteSpace($V)) { throw 'could not resolve the latest release version' }
+  $T = Join-Path $env:TEMP ("herdr-magpie-" + [Guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Force -Path $T | Out-Null
+  try {
+    & $Curl -fsSL "https://github.com/dorokuma/herdr-magpie/releases/download/v$V/herdr-magpie-$V.tar.gz" -o "$T\pkg.tgz"
+    if ($LASTEXITCODE -ne 0) { throw "curl failed (exit $LASTEXITCODE)" }
+    & $Tar xzf "$T\pkg.tgz" -C $T
+    if ($LASTEXITCODE -ne 0) { throw "tar failed (exit $LASTEXITCODE)" }
+    & "$T\herdr-magpie-$V\install.ps1"
+  } finally {
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath $T
+  }
+}
+```
+
+若本机 PowerShell 执行策略为 `Restricted`，需先允许执行本地脚本，例如 `Set-ExecutionPolicy -Scope Process RemoteSigned`。
+
 想用 clone 方式安装？见[目录结构与本地开发](#目录结构与本地开发)。
+
+安装脚本按 `herdr-app` 自身的规则解析配置目录：优先 `$HERDR_APP_HOME`，其次 `$XDG_CONFIG_HOME/herdr-app`，否则 Linux 与 macOS 为 `~/.config/herdr-app`、Windows 为 `%USERPROFILE%\.config\herdr-app`。如果你的 Herdr 运行在 Windows 宿主机上，请在 Windows 原生 PowerShell 中运行安装脚本——在 WSL 中运行 `install.sh` 只会安装给同样运行在 WSL 内的 Herdr。
 
 ### 2. 切换到 `Magpie` 布局
 
@@ -157,7 +194,8 @@ herdr-magpie/
 ├── tests/                          # node --test tests/*.test.mjs（见 tests/README.md）
 ├── scripts/release-check.sh        # 发布门禁
 ├── RECIPE.md                       # Herdr 布局与 mod 构建规范
-└── install.sh                      # 一键安装与校验脚本
+├── install.sh                      # 一键安装与校验脚本（Linux 与 macOS）
+└── install.ps1                     # 一键安装与校验脚本（Windows）
 ```
 
 克隆仓库并运行 `./install.sh`（把 `layouts/` 与 `mods/` 拷入 `~/.config/herdr-app`，并用 `herdr-app check` 校验两个 mod）：
@@ -167,6 +205,14 @@ git clone https://github.com/dorokuma/herdr-magpie.git
 cd herdr-magpie
 chmod +x install.sh
 ./install.sh
+```
+
+Windows 下同样克隆仓库，在 PowerShell 中运行安装脚本（装入 `%USERPROFILE%\.config\herdr-app`）：
+
+```powershell
+git clone https://github.com/dorokuma/herdr-magpie.git
+cd herdr-magpie
+.\install.ps1
 ```
 
 离线测试套件：`node --test tests/*.test.mjs`（见 `tests/README.md`）；Herdr 布局与 mod 构建规范见 `RECIPE.md`。

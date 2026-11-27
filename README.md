@@ -49,12 +49,49 @@ You need [Herdr](https://herdr.dev) and a Magpie gateway on `127.0.0.1:3425` —
 
 ### 1. Install
 
+**macOS / Linux** — paste into a terminal:
+
 ```bash
-V=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/dorokuma/herdr-magpie/releases/latest | sed 's|.*/v||')
-curl -fsSL "https://github.com/dorokuma/herdr-magpie/releases/download/v$V/herdr-magpie-$V.tar.gz" | tar xz -C /tmp && "/tmp/herdr-magpie-$V/install.sh"
+(
+  set -e
+  V=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/dorokuma/herdr-magpie/releases/latest | sed 's|.*/v||')
+  T=$(mktemp -d)
+  trap 'rm -rf "$T"' EXIT
+  curl -fsSL "https://github.com/dorokuma/herdr-magpie/releases/download/v$V/herdr-magpie-$V.tar.gz" | tar xz -C "$T"
+  "$T/herdr-magpie-$V/install.sh"
+)
 ```
 
+**Windows** — paste into PowerShell (native Windows PowerShell, not WSL):
+
+```powershell
+& {
+  $ErrorActionPreference = 'Stop'
+  $Curl = "$env:SystemRoot\System32\curl.exe"
+  $Tar = "$env:SystemRoot\System32\tar.exe"
+  $Url = & $Curl -fsSLI -o NUL -w '%{url_effective}' https://github.com/dorokuma/herdr-magpie/releases/latest
+  if ($LASTEXITCODE -ne 0) { throw "curl failed (exit $LASTEXITCODE)" }
+  $V = ([string]$Url) -replace '.*/v', ''
+  if ([string]::IsNullOrWhiteSpace($V)) { throw 'could not resolve the latest release version' }
+  $T = Join-Path $env:TEMP ("herdr-magpie-" + [Guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Force -Path $T | Out-Null
+  try {
+    & $Curl -fsSL "https://github.com/dorokuma/herdr-magpie/releases/download/v$V/herdr-magpie-$V.tar.gz" -o "$T\pkg.tgz"
+    if ($LASTEXITCODE -ne 0) { throw "curl failed (exit $LASTEXITCODE)" }
+    & $Tar xzf "$T\pkg.tgz" -C $T
+    if ($LASTEXITCODE -ne 0) { throw "tar failed (exit $LASTEXITCODE)" }
+    & "$T\herdr-magpie-$V\install.ps1"
+  } finally {
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath $T
+  }
+}
+```
+
+If your PowerShell execution policy is `Restricted`, allow local scripts first, e.g. `Set-ExecutionPolicy -Scope Process RemoteSigned`.
+
 Prefer a clone instead? See [What's Included & Local Development](#whats-included--local-development).
+
+The installer resolves Herdr's config directory the way `herdr-app` itself does: `$HERDR_APP_HOME` when set, else `$XDG_CONFIG_HOME/herdr-app`, else `~/.config/herdr-app` on Linux and macOS or `%USERPROFILE%\.config\herdr-app` on Windows. If your Herdr runs on the Windows host, run the PowerShell installer there — running `install.sh` inside WSL only installs for a Herdr that itself runs inside WSL.
 
 ### 2. Switch to the `Magpie` Layout
 
@@ -163,7 +200,8 @@ herdr-magpie/
 ├── tests/                          # node --test tests/*.test.mjs (see tests/README.md)
 ├── scripts/release-check.sh        # Release gate
 ├── RECIPE.md                       # Herdr layout & mod build specification
-└── install.sh                      # One-step installer & verifier
+├── install.sh                      # One-step installer & verifier (Linux & macOS)
+└── install.ps1                     # One-step installer & verifier (Windows)
 ```
 
 Clone and run `./install.sh` (copies `layouts/` and `mods/` into `~/.config/herdr-app` and validates both mods with `herdr-app check`):
@@ -173,6 +211,14 @@ git clone https://github.com/dorokuma/herdr-magpie.git
 cd herdr-magpie
 chmod +x install.sh
 ./install.sh
+```
+
+On Windows, clone the same way and run the PowerShell installer (into `%USERPROFILE%\.config\herdr-app`):
+
+```powershell
+git clone https://github.com/dorokuma/herdr-magpie.git
+cd herdr-magpie
+.\install.ps1
 ```
 
 Run the offline test suite with `node --test tests/*.test.mjs` (see `tests/README.md`), and read `RECIPE.md` for the Herdr layout & mod build specification.

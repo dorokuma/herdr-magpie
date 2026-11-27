@@ -113,6 +113,10 @@ function hostModules(env) {
       appHome: () => env.appHome(),
       readTextFile: (p) => env.readTextFile(p),
       notify: (n) => env.notify(n),
+      // herdr's window(): the platform is what the mod branches on. A test
+      // hands in its own answer (windows, or null as `herdr-app check` sees);
+      // the default is the Linux panel most installs run on.
+      window: env.window ?? (() => ({ platform: "linux" })),
     },
   };
 }
@@ -129,11 +133,13 @@ export function realExec(cmd, args = [], opts = {}) {
   return Promise.resolve({ code: r.status ?? 1, stdout: r.stdout || "", stderr: r.stderr || String(r.error || "") });
 }
 
-// loadMod({ source?, home?, exec?, store? }) -> { Routing, env, notes, store, cx, make }
+// loadMod({ source?, home?, exec?, store?, window? }) -> { Routing, env, notes, store, cx, make }
 //   source  the text of a main.js; default: this checkout's. A released one
 //           comes from `git show vX.Y.Z:mods/routing/main.js`.
 //   home    what appHome() answers: the folder holding mods/ and layouts/.
-export async function loadMod({ source, home, exec, store } = {}) {
+//   window  what herdr's window() answers: a function returning the window's
+//           metadata, or null as it does during `herdr-app check`.
+export async function loadMod({ source, home, exec, store, window: windowFn } = {}) {
   const src = source ?? fs.readFileSync(MAIN, "utf8");
   const notes = [];
   const env = {
@@ -142,6 +148,7 @@ export async function loadMod({ source, home, exec, store } = {}) {
     appHome: () => env.home,
     readTextFile: async (p) => fs.readFileSync(p, "utf8"),
     notify: (n) => { notes.push(n); },
+    window: windowFn,
   };
   const st = store ?? storage();
   const id = `m${++seq}`;
@@ -150,7 +157,13 @@ export async function loadMod({ source, home, exec, store } = {}) {
   const swapped = [];
   let body = src.replace(IMPORT, (_all, names, from) => {
     swapped.push(from);
-    return `const {${names}} = __host.mods[${JSON.stringify(from)}];`;
+    // `import { a, b as c }` becomes destructuring `const { a, b: c }`: the
+    // `as` form is not valid inside braces, only the colon one is
+    const destructured = names.split(",").map((n) => {
+      const m = /^\s*([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)\s*$/.exec(n);
+      return m ? `${m[1]}: ${m[2]}` : n;
+    }).join(",");
+    return `const {${destructured}} = __host.mods[${JSON.stringify(from)}];`;
   });
   const unknown = swapped.filter((m) => !HOST.includes(m));
   if (unknown.length) throw new Error(`main.js imports a module the harness has no stand-in for: ${unknown.join(", ")}`);

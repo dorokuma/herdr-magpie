@@ -7,7 +7,7 @@
 
 import { View, div, svg, image, PathBuilder } from "gpui-kit";
 import { h_flex, v_flex, Scrollbar } from "gpui-base";
-import { theme, exec, settings, appHome, readTextFile, notify } from "herdr";
+import { theme, exec, settings, appHome, readTextFile, notify, window as herdrWindow } from "herdr";
 // `window` here is gpui-shell's global window object (its paint_path is an
 // element constructor), not herdr's window() — a function that only reports
 // metadata. Importing the herdr one shadows the global and breaks render.
@@ -67,6 +67,36 @@ const BUILTIN_ICONS = {
   azure: "azure-color", nvidia: "nvidia-color", poe: "poe", monica: "monica-color", coze: "coze",
   "cline-pass": "cline", "stepfun-cn": "stepfun-color", "~keys": "magpie",
 };
+
+// UTF-8 string -> Base64, in plain ECMAScript: this mod runs inside Herdr's
+// QuickJS, where neither Buffer nor unescape/encodeURI tricks can be counted
+// on. An unpaired surrogate encodes as the replacement character, the way
+// TextEncoder does.
+function utf8ToBase64(str) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const bytes = [];
+  for (let i = 0; i < str.length; i++) {
+    let c = str.charCodeAt(i);
+    if (c < 0x80) { bytes.push(c); continue; }
+    if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
+      const lo = str.charCodeAt(i + 1);
+      if (lo >= 0xdc00 && lo <= 0xdfff) { c = 0x10000 + ((c - 0xd800) << 10) + (lo - 0xdc00); i++; }
+    }
+    if (c >= 0xd800 && c <= 0xdfff) c = 0xfffd;
+    if (c < 0x800) bytes.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+    else if (c < 0x10000) bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+    else bytes.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 0x3f), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+  }
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i], b = bytes[i + 1], d = bytes[i + 2];
+    const n = (a << 16) | ((b ?? 0) << 8) | (d ?? 0);
+    out += alphabet[(n >> 18) & 63] + alphabet[(n >> 12) & 63]
+      + (b === undefined ? "=" : alphabet[(n >> 6) & 63])
+      + (d === undefined ? "=" : alphabet[n & 63]);
+  }
+  return out;
+}
 
 const ICON_PATTERNS = [
   [/workbuddy/, "workbuddy-color"], [/codebuddy/, "codebuddy-color"], [/cline/, "cline"],
@@ -330,9 +360,44 @@ export default class Routing extends View {
     cx.notify();
   }
 
+  // herdr's window() is a function that reports metadata; during `herdr-app
+  // check` (no window exists) it answers null. Anything but "windows" --
+  // including not knowing -- means the Unix path, which is what a remote
+  // Linux host reached through herdr-core needs too.
+  isWindows() {
+    try { return herdrWindow?.()?.platform === "windows"; } catch (_) { return false; }
+  }
+
   async discoverProviders() {
     try {
-      const r = await exec("sh", ["-c", "cat ~/.config/magpie/providers.json 2>/dev/null || true"], this.execOpts(10000));
+      // magpie's providers.json sits next to the rest of its config: under
+      // XDG_CONFIG_HOME when that is set (absolute paths only), else in the
+      // profile's .config. On Windows neither /bin/sh nor ~/ exists, so the
+      // same probe is phrased for PowerShell; a remote host always gets the
+      // shell form, whatever the panel's own platform is.
+      let r;
+      if (!this.remote && this.isWindows()) {
+        // magpie's appdir rules, phrased for PowerShell: an XDG_CONFIG_HOME
+        // that is a full path (a drive one, or a UNC share spelled either
+        // way -- \\\\server\\share and //server/share both count, a lone
+        // leading \\foo or /foo does not -- and a drive-relative C:x does
+        // not count either, IsPathRooted mistakes it for absolute) is the
+        // ONLY config root then; when the file is not there there is no
+        // falling back to the profile's copy. Only an unset or non-absolute
+        // XDG_CONFIG_HOME reads the profile one.
+        const ps = "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+          + "$xdg = [string]$env:XDG_CONFIG_HOME;"
+          + "$p = $null;"
+          + "if ($xdg -match '^[A-Za-z]:[\\\\/]|^[\\\\/]{2}') { $p = Join-Path (Join-Path $xdg 'magpie') 'providers.json' }"
+          + "elseif (-not [string]::IsNullOrEmpty($env:USERPROFILE)) { $p = Join-Path (Join-Path (Join-Path $env:USERPROFILE '.config') 'magpie') 'providers.json' };"
+          + "if ($p -and (Test-Path -LiteralPath $p)) { Get-Content -Raw -Encoding UTF8 -LiteralPath $p }";
+        r = await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], this.execOpts(10000));
+      } else {
+        const sh = 'if [ -n "$XDG_CONFIG_HOME" ] && [ "${XDG_CONFIG_HOME#/}" != "$XDG_CONFIG_HOME" ]; then'
+          + ' cat "$XDG_CONFIG_HOME/magpie/providers.json" 2>/dev/null;'
+          + ' else cat ~/.config/magpie/providers.json 2>/dev/null; fi || true';
+        r = await exec("sh", ["-c", sh], this.execOpts(10000));
+      }
       if (!r.stdout) return;
       const d = JSON.parse(r.stdout);
       for (const p of d.providers || []) {
@@ -1515,7 +1580,9 @@ export default class Routing extends View {
   // releases/latest redirects to the newest published, non-draft, non-prerelease
   // tag; the tag is read off the final address. Resolves to whether the answer moved.
   async latestRelease() {
-    const r = await exec("curl", ["-fsSLI", "--max-time", "10", "-o", "/dev/null", "-w", "%{url_effective}",
+    // /dev/null is the bit bucket on every Unix; on Windows the same idea
+    // is spelled NUL (curl.exe there is the real curl, only the name differs)
+    const r = await exec("curl", ["-fsSLI", "--max-time", "10", "-o", this.isWindows() ? "NUL" : "/dev/null", "-w", "%{url_effective}",
       `https://github.com/${UPDATE_REPO}/releases/latest`], { timeout: 15000 });
     if (r.code !== 0) throw new Error((r.stderr || "").trim() || `curl exited ${r.code}`);
     const m = /\/releases\/tag\/v?(\d+\.\d+\.\d+)\s*$/.exec(r.stdout || "");
@@ -1583,6 +1650,98 @@ export default class Routing extends View {
     ].join("\n");
   }
 
+  // The updateScript() of Windows: the same fetch-verify-overlay-rename
+  // order, phrased for PowerShell. curl.exe and tar.exe are named by their
+  // full System32 path because the ones Git for Windows ships parse a path
+  // with a drive letter ("C:\\...") as scp syntax and fail the download as a
+  // "remote host". Everything runs inside try/finally so the temporary
+  // folder is removed however the run ends.
+  updateScriptWindows(version) {
+    // The install root never goes into the script as quoted text: a path
+    // spelled in single quotes still breaks on a user folder that itself
+    // contains a ' or a curly ’, and PowerShell reads a backtick inside
+    // double quotes as an escape. Base64 carries the exact UTF-8 bytes as
+    // pure data instead -- alphabet digits and +/ only -- and the script
+    // decodes it back; no quoting rule can ever touch it.
+    const home64 = utf8ToBase64(appHome());
+    return [
+      "$ErrorActionPreference = 'Stop'",
+      `$H = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${home64}'))`,
+      `$V = '${String(version).replace(/'/g, "''")}'`,
+      `$U = "https://github.com/${UPDATE_REPO}/releases/download/v$V/herdr-magpie-$V.tar.gz"`,
+      "$Curl = Join-Path $env:SystemRoot 'System32\\curl.exe'",
+      "$Tar = Join-Path $env:SystemRoot 'System32\\tar.exe'",
+      "$T = Join-Path ([IO.Path]::GetTempPath()) ('herdr-magpie-' + [Guid]::NewGuid().ToString('N'))",
+      "New-Item -ItemType Directory -Force -Path $T | Out-Null",
+      // every file and folder below is addressed by -LiteralPath and copies
+      // walk the source children one item at a time (no \\* wildcard tails),
+      // so an install or temp path holding [ or ], $ or a backtick -- all
+      // legal in a Windows user name -- is taken as the plain text it is.
+      // New-Item is the one exception: it has no -LiteralPath, but its -Path
+      // already passes every character through, wildcards uninterpreted.
+      "try {",
+      // a connection to GitHub that drops mid-handshake is common on some
+      // networks; three tries each, checking the exit code of a native
+      // command that never raises
+      "  function Get-File($Timeout, $Out, $Url) {",
+      "    for ($n = 0; $n -lt 3; $n++) {",
+      "      & $Curl -fsSL --max-time $Timeout -o \"$Out\" $Url",
+      "      if ($LASTEXITCODE -eq 0) { return }",
+      "      Start-Sleep -Seconds 2",
+      "    }",
+      "    [Console]::Error.WriteLine(\"download failed: $Url\"); exit 1",
+      "  }",
+      "  Get-File 120 (Join-Path $T 'pkg.tgz') $U",
+      "  Get-File 20 (Join-Path $T 'pkg.sha256') ($U + '.sha256')",
+      // an empty checksum file reads back as $null; the cast keeps it a
+      // string, so the comparison below -- not a null-method error -- is
+      // what reports the mismatch
+      "  $Want = (([string](Get-Content -Raw -LiteralPath (Join-Path $T 'pkg.sha256'))) -split '\\s+')[0].ToLowerInvariant()",
+      "  $Got = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $T 'pkg.tgz')).Hash.ToLowerInvariant()",
+      "  if (-not $Want -or $Want -ne $Got) { [Console]::Error.WriteLine('checksum mismatch'); exit 1 }",
+      "  $X = Join-Path $T 'x'",
+      "  New-Item -ItemType Directory -Force -Path $X | Out-Null",
+      "  & $Tar xzf \"$(Join-Path $T 'pkg.tgz')\" -C \"$X\" --strip-components=1",
+      "  if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine('could not unpack the release'); exit 1 }",
+      "  if (-not ((Test-Path -LiteralPath (Join-Path $X 'mods\\routing\\main.js')) -and (Test-Path -LiteralPath (Join-Path $X 'mods\\tabs-routing\\main.js')))) {",
+      "    [Console]::Error.WriteLine('the release is missing its mods'); exit 1",
+      "  }",
+      "  if (-not (Test-Path -LiteralPath (Join-Path $X 'mods\\routing\\VERSION'))) { Set-Content -NoNewline -LiteralPath (Join-Path $X 'mods\\routing\\VERSION') -Value (\"$V`n\") }",
+      // the overlay, in the same order as the Unix updater: main.js aside
+      // first, tabs-routing, the layout, routing (config.json in the archive
+      // never lands, but the skip also guards a repacked archive), and the
+      // new main.js last, by atomic replace, so Herdr reloads once onto a
+      // complete install
+      "  Move-Item -Force -LiteralPath (Join-Path $X 'mods\\routing\\main.js') -Destination (Join-Path $T 'main.js')",
+      "  foreach ($d in @('mods\\routing', 'mods\\tabs-routing', 'layouts')) {",
+      "    New-Item -ItemType Directory -Force -Path (Join-Path $H $d) | Out-Null",
+      "  }",
+      "  Get-ChildItem -LiteralPath (Join-Path $X 'mods\\tabs-routing') -Force | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $H 'mods\\tabs-routing') -Recurse -Force }",
+      "  if (Test-Path -LiteralPath (Join-Path $X 'layouts')) { Get-ChildItem -LiteralPath (Join-Path $X 'layouts') -Force | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $H 'layouts') -Recurse -Force } }",
+      "  Get-ChildItem -LiteralPath (Join-Path $X 'mods\\routing') -Force | Where-Object { $_.Name -ne 'config.json' } | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $H 'mods\\routing') -Recurse -Force }",
+      "  Copy-Item -Force -LiteralPath (Join-Path $T 'main.js') -Destination (Join-Path $H 'mods\\routing\\.main.js.new')",
+      // the swap: same volume (same folder), so .NET's Replace is the Win32
+      // ReplaceFileW -- the target keeps its old content until the new file
+      // is fully in place, where Move-Item -Force deleted it first. Move is
+      // already atomic for the first install, when nothing is there yet. The
+      // null backup path is passed as NullString::Value: under Windows
+      // PowerShell 5.1 a bare $null arriving at a [string] parameter is
+      // marshalled as "" and ReplaceFileW fails on the empty backup path;
+      // NullString::Value crosses the boundary as a real CLR null, on 5.1
+      // and on PowerShell 7+ alike.
+      "  $TmpMain = Join-Path $H 'mods\\routing\\.main.js.new'",
+      "  $DstMain = Join-Path $H 'mods\\routing\\main.js'",
+      "  if ([IO.File]::Exists($DstMain)) {",
+      "    [IO.File]::Replace($TmpMain, $DstMain, [System.Management.Automation.Language.NullString]::Value)",
+      "  } else {",
+      "    [IO.File]::Move($TmpMain, $DstMain)",
+      "  }",
+      "} finally {",
+      "  Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath $T",
+      "}",
+    ].join("\n");
+  }
+
   async updateMod(cx) {
     if (this.demo || this.updateBusy) return;
     this.updateBusy = true;
@@ -1592,7 +1751,12 @@ export default class Routing extends View {
       await this.checkLatest(); // a release may have landed since the button appeared
       const v = this.upd.latest;
       if (!SEMVER.test(v) || !this.newerThan(v, this.modVersion)) return; // nothing newer after all
-      const r = await exec("sh", ["-c", this.updateScript(v)], { timeout: 480000 });
+      // eight minutes either way; on Windows the updater is the PowerShell
+      // one, and only ever on the panel's own machine (a remote host keeps
+      // the shell form it understands)
+      const r = this.isWindows()
+        ? await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", this.updateScriptWindows(v)], { timeout: 480000 })
+        : await exec("sh", ["-c", this.updateScript(v)], { timeout: 480000 });
       if (r.code !== 0) throw new Error((r.stderr || "").trim().split("\n").pop() || `exited ${r.code}`);
       // Herdr is reloading the mod onto the new files; if this instance is
       // still the one drawn, it carries on as the new version

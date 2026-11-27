@@ -21,7 +21,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 REPO="dorokuma/herdr-magpie"
 # what install.sh and the update pill put on a person's machine
-INSTALLED=(mods layouts install.sh)
+INSTALLED=(mods layouts install.sh install.ps1)
 
 MODE=gate OUT="" ASKED=""
 while [ $# -gt 0 ]; do
