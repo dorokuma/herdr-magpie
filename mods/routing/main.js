@@ -23,7 +23,7 @@ const UPDATE_EVERY = 6 * 60 * 60 * 1000;   // the routine look, by the wall cloc
 const UPDATE_ASKED = 10 * 60 * 1000;       // the floor between looks a person causes
 const UPDATE_RETRY = [2, 10, 30, 60].map((m) => m * 60 * 1000); // after a failed look
 const SEMVER = /^\d+\.\d+\.\d+$/;
-const FRAME = 24;          // ms between animation frames, only while flying
+const FRAME = 33;          // ms between animation frames (~30 FPS) when animating
 const MAX_AGENTS = 4;      // the stage's four, as in magpie
 const MAX_ACCOUNTS = 6;
 const STAGE_STYLES = ["minimal", "stream", "magpie"];
@@ -156,6 +156,45 @@ const iconEl = (id, size, color, customMap) => iconNamed(resolveIconName(id, cus
 // providers apart ("StepFun (China)") is left alone.
 const provLabel = (name) => String(name ?? "").replace(/\s*\(local\b[^)]*\)\s*$/i, "") || String(name ?? "");
 
+const AGENT_LABELS = Object.assign(Object.create(null), {
+  claude: "Claude", "claude-code": "Claude",
+  codex: "Codex", alma: "Alma",
+  magpie: "Magpie", "remote-magpie": "Magpie",
+  gemini: "Gemini", "gemini-cli": "Gemini",
+  cursor: "Cursor", opencode: "OpenCode",
+  workbuddy: "WorkBuddy", "workbuddy-ai": "WorkBuddy",
+  codebuddy: "CodeBuddy", windsurf: "Windsurf",
+  roocode: "RooCode", cline: "Cline",
+  copilot: "Copilot", githubcopilot: "Copilot",
+  kiro: "Kiro", devin: "Devin", crush: "Crush",
+  goose: "Goose", trae: "Trae",
+  agy: "Agy", "agy-cli": "Agy", antigravity: "Antigravity",
+  pi: "Pi", "pi-desktop": "Pi", pig: "Pig",
+  omp: "OMP", omo: "OMO", dsh: "DSH",
+});
+
+const agentLabel = (id) => {
+  const raw = String(id || "");
+  if (!raw) return "";
+  const lower = raw.toLowerCase();
+  if (Object.hasOwn(AGENT_LABELS, lower)) return AGENT_LABELS[lower];
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+};
+
+const shortModelName = (model, provider, acct) => {
+  const m = String(model || "").trim();
+  if (!m) return "";
+  const slash = m.indexOf("/");
+  if (slash > 0) {
+    const prefix = m.slice(0, slash).toLowerCase();
+    const rest = m.slice(slash + 1);
+    if (rest && (prefix === String(provider || "").toLowerCase() || prefix === String(acct || "").toLowerCase())) {
+      return rest;
+    }
+  }
+  return m;
+};
+
 const hueOf = (id) => {
   const s = String(id || "");
   if (HUES[s] !== undefined) return PALETTE[HUES[s]];
@@ -251,8 +290,8 @@ export default class Routing extends View {
       for (const [k, t0] of this.ticks) if (now - t0 > 400) { this.ticks.delete(k); changed = true; }
       const inFlightAny = [...this.routes.values()].some((r) => !r.done);
       const needsFlow = inFlightAny && this.stageStyle !== "minimal";
-      const animating = needsFlow || [...this.flights.values()].some((f) => f.state === "fly") ||
-        this.shakes.size > 0 || this.ticks.size > 0;
+      const needsFly = this.stageStyle !== "minimal" && [...this.flights.values()].some((f) => f.state === "fly");
+      const animating = needsFlow || needsFly || this.shakes.size > 0 || this.ticks.size > 0;
       const secTick = inFlightAny && (now - this.lastSecTick >= 1000);
       if (secTick) this.lastSecTick = now;
       if (animating || changed || secTick) cx.notify();
@@ -1063,24 +1102,23 @@ export default class Routing extends View {
   }
 
   estTextW(s, px, bold = false) {
-    // calibrated against measured UI sans-serif widths: biased slightly high
-    // so pillW never under-sizes text that actually fits, while GPUI's native
-    // truncate() handles exact glyph-boundary ellipsis when constrained.
+    // calibrated against measured SF Pro / Inter sans-serif widths so fitText
+    // uses available width cleanly without prematurely chopping model names.
     let w = 0;
     for (const ch of String(s || "")) {
       const c = ch.charCodeAt(0);
-      if (c > 255) w += px * 1.02;
-      else if (/[mw]/.test(ch)) w += px * 0.85;
-      else if (/[MWGOQD]/.test(ch)) w += px * 0.82;
-      else if (/[A-Z]/.test(ch)) w += px * 0.72;
-      else if (/[0-9]/.test(ch)) w += px * 0.60;
-      else if (ch === "-") w += px * 0.42;
-      else if (/[iIl.,:;|!()[\] tfrj]/.test(ch)) w += px * 0.38;
-      else if (ch === "%") w += px * 0.82;
-      else w += px * 0.58;
+      if (c > 255) w += px * 1.00;
+      else if (/[mw]/.test(ch)) w += px * 0.80;
+      else if (/[MWGOQD]/.test(ch)) w += px * 0.78;
+      else if (/[A-Z]/.test(ch)) w += px * 0.67;
+      else if (/[0-9]/.test(ch)) w += px * 0.56;
+      else if (ch === "-") w += px * 0.38;
+      else if (/[iIl.,:;|!()[\] tfrj]/.test(ch)) w += px * 0.33;
+      else if (ch === "%") w += px * 0.78;
+      else w += px * 0.53;
     }
-    if (bold) w *= 1.06;
-    return w > 0 ? Math.ceil(w) + 2 : 0;
+    if (bold) w *= 1.04;
+    return w > 0 ? Math.ceil(w) + 1 : 0;
   }
 
   // Hard-truncate a string to `budget` px without adding an ellipsis.
@@ -1102,20 +1140,21 @@ export default class Routing extends View {
     const H = 2 * PAD + n * ROW_H;
     const cy = (i) => PAD + i * ROW_H + ROW_H / 2;
     const ax = W < 280 ? 2 : 5;
-    // Left pill chrome: BORDER(2) + px(6)*2(12) + ICON_BOX(13) + GAP(4) = 31
-    const AGENT_CHROME = 31;
+    // Left chip chrome: BORDER(2) + px(5)*2(10) + ICON_BOX(13) + GAP(4) = 29
+    const AGENT_CHROME = 29;
     const agentNeed = (this.agents || []).reduce(
-      (m, a) => Math.max(m, AGENT_CHROME + this.estTextW(a?.id, 11, true)), 56);
+      (m, a) => Math.max(m, AGENT_CHROME + this.estTextW(agentLabel(a?.id), 11, true)), 56);
     const agentMax = Math.min(104, Math.max(76, Math.round(W * 0.28)));
     const agentW = Math.max(56, Math.min(agentMax, agentNeed));
 
-    const BORDER = 2, PAD_X = 8, DOT = 6, DOT_GAP = 6, COL_GAP = 10;
-    const hasModel = (this.accounts || []).some((a) => Boolean(a?.model));
-    const chromeW = BORDER + PAD_X * 2 + DOT + DOT_GAP + (hasModel ? COL_GAP : 0);
+    const BORDER = 2, PAD_X = 6, DOT = 6, DOT_GAP = 5, SEP_GAP = 4, SEP_W = 1, DIVIDER_W = SEP_GAP * 2 + SEP_W;
+    const hasModel = (this.accounts || []).some((a) => Boolean(shortModelName(a?.model, "", a?.name)));
+    const chromeW = BORDER + PAD_X * 2 + DOT + DOT_GAP + (hasModel ? DIVIDER_W : 0);
     let rawNameW = 0, rawModelW = 0;
     for (const a of this.accounts || []) {
       rawNameW = Math.max(rawNameW, this.estTextW(a?.name, 11, true));
-      if (a?.model) rawModelW = Math.max(rawModelW, this.estTextW(a.model, 9.5, false));
+      const mLabel = shortModelName(a?.model, "", a?.name);
+      if (mLabel) rawModelW = Math.max(rawModelW, this.estTextW(mLabel, 9.5, false));
     }
 
     // Reserve at least minSky for the S-curve corridor on narrow panels;
@@ -1436,7 +1475,7 @@ export default class Routing extends View {
     return `${ms}ms`;
   }
   fmtElapsed(ms) {
-    if (ms < 1000) return `${ms}ms`;
+    if (ms < 1000) return "<1s";
     if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
     return `${(ms / 60000).toFixed(1)}m`;
   }
@@ -2436,7 +2475,7 @@ export default class Routing extends View {
       return p < .2 ? -5 * p / .2 : p < .4 ? -5 + 9 * (p - .2) / .2 : p < .6 ? 4 - 6 * (p - .4) / .2 : p < .8 ? -2 + 3 * (p - .6) / .2 : 1 - (p - .8) / .2;
     };
 
-    // agent chips: bordered pills with client icons, restrained spotlight when active
+    // agent chips: rounded-rect pills with client icons, restrained spotlight when active
     for (let i = 0; i < this.agents.length; i++) {
       const a = this.agents[i], b = g.agent(i);
       const on = liveAgents.has(a.id), ticked = this.ticks.has(a.id);
@@ -2450,7 +2489,7 @@ export default class Routing extends View {
         : div().id(`agent-icon-${a.id}`).size(13).flex_none().flex().items_center().justify_center()
             .child(div().size(6).rounded(3).bg(a.color));
       children.push(h_flex().id(`agent-pill-${a.id}`).absolute().left(b.x1 + shake(a.id)).top(b.cy - 13).w(g.agentW).h(26)
-        .items_center().gap(4).px(6).rounded(13).cursor_pointer()
+        .items_center().gap(4).px(5).rounded(7).cursor_pointer()
         .bg(selected ? t.selected : on ? rgba(a.color, 0.08) : hovered ? t.raised : t.canvas)
         .border(1).border_color(selected ? t.accent : on ? rgba(a.color, 0.85) : hovered ? t.selected : t.border)
         .when(!on && hasLive && !hovered && !selected, el => el.opacity(0.48))
@@ -2467,23 +2506,20 @@ export default class Routing extends View {
         .child(leading)
         .child(div().text_size(11).font_semibold().min_w(0).overflow_hidden().whitespace_nowrap()
           .text_color(ticked ? t.accent : (on || hovered || selected) ? t.foreground : t.muted)
-          .child(this.fitText(a.id, 11, Math.max(12, g.agentW - 31), true))));
+          .child(this.fitText(agentLabel(a.id), 11, Math.max(12, g.agentW - 29), true))));
     }
-    // Account pills: exact zero-overflow horizontal accounting.
-    //   pillW = BORDER(2) + PAD_X*2(16) + DOT(6) + DOT_GAP(6) [+ COL_GAP(10)] + name + model
-    // Outer h_flex has NO .gap() so the flex_1 spacer never adds extra gaps.
-    // Every row satisfies rowNameMax + rowModelMax <= innerW, so children can
-    // never exceed contentW = pillW - 18; right padding stays symmetric with
-    // left padding (8px), models sit flush right, and native .truncate() clips
-    // cleanly at glyph boundaries with an ellipsis.
-    const BORDER = 2, PAD_X = 8, DOT = 6, DOT_GAP = 6, COL_GAP = 10;
-    const hasModel = this.accounts.some((a) => Boolean(a.model));
-    const chromeW = BORDER + PAD_X * 2 + DOT + DOT_GAP + (hasModel ? COL_GAP : 0);
+    // Account chips: compact layout with 1px hairline divider (`|`) and zero-overflow accounting.
+    //   pillW = BORDER(2) + PAD_X*2(12) + DOT(6) + DOT_GAP(5) [+ DIVIDER_W(9)] + name + model
+    const BORDER = 2, PAD_X = 6, DOT = 6, DOT_GAP = 5, SEP_GAP = 4, SEP_W = 1, DIVIDER_W = SEP_GAP * 2 + SEP_W;
+    const acctModels = this.accounts.map((a) => shortModelName(a.model, "", a.name));
+    const hasModel = acctModels.some(Boolean);
+    const chromeW = BORDER + PAD_X * 2 + DOT + DOT_GAP + (hasModel ? DIVIDER_W : 0);
 
     let rawNameW = 0, rawModelW = 0;
-    for (const a of this.accounts) {
+    for (let j = 0; j < this.accounts.length; j++) {
+      const a = this.accounts[j];
       rawNameW = Math.max(rawNameW, this.estTextW(a.name, 11, true));
-      if (a.model) rawModelW = Math.max(rawModelW, this.estTextW(a.model, 9.5, false));
+      if (acctModels[j]) rawModelW = Math.max(rawModelW, this.estTextW(acctModels[j], 9.5, false));
     }
 
     const pillW = g.acctW;
@@ -2506,25 +2542,29 @@ export default class Routing extends View {
       const selected = this.selectedAcct === a.key;
       const errShake = this.shakes.has(a.key);
       const aNameW = this.estTextW(a.name, 11, true);
-      const aModelW = a.model ? this.estTextW(a.model, 9.5, false) : 0;
+      const aModel = acctModels[j];
+      const aModelW = aModel ? this.estTextW(aModel, 9.5, false) : 0;
       let rowNameMax = nameColB;
       let rowModelMax = modelColB;
-      if (!a.model) {
-        rowNameMax = innerW + (hasModel ? COL_GAP : 0);
+      if (!aModel) {
+        rowNameMax = innerW + (hasModel ? DIVIDER_W : 0);
         rowModelMax = 0;
-      } else if (aNameW < nameColB && aModelW > modelColB) {
-        rowNameMax = aNameW;
-        rowModelMax = Math.max(0, innerW - rowNameMax);
-      } else if (aModelW < modelColB && aNameW > nameColB) {
-        rowModelMax = aModelW;
-        rowNameMax = Math.max(0, innerW - rowModelMax);
+      } else {
+        const availModel = Math.max(0, innerW - Math.min(aNameW, nameColB));
+        if (aModelW <= availModel && aNameW > nameColB) {
+          rowModelMax = aModelW;
+          rowNameMax = Math.min(aNameW, Math.max(0, innerW - rowModelMax));
+        } else {
+          rowNameMax = Math.min(aNameW, nameColB);
+          rowModelMax = Math.min(aModelW, Math.max(0, innerW - rowNameMax));
+        }
       }
       const nameTxt = this.fitText(a.name, 11, rowNameMax, true);
-      const modelTxt = a.model ? this.fitText(a.model, 9.5, rowModelMax, false) : "";
+      const modelTxt = aModel ? this.fitText(aModel, 9.5, rowModelMax, false) : "";
       const hotColor = errShake ? "#e26a6a" : hot;
       children.push(h_flex().id(`acct-pill-${a.key}`).absolute().left(b.x1 + shake(a.key)).top(b.cy - 13)
         .w(pillW).h(26).overflow_hidden()
-        .items_center().px(PAD_X).rounded(13).cursor_pointer()
+        .items_center().px(PAD_X).rounded(7).cursor_pointer()
         .bg(selected ? t.selected : hot ? rgba(hotColor, 0.07) : hovered ? t.raised : t.canvas)
         .border(1)
         .border_color(errShake ? "#e26a6a" : selected ? t.accent : hot ? rgba(hot, 0.75) : hovered ? t.selected : t.border)
@@ -2548,9 +2588,10 @@ export default class Routing extends View {
             .overflow_hidden().whitespace_nowrap()
             .text_color((hot || hovered || selected) ? t.foreground : t.muted)
             .child(nameTxt)))
-        .when(Boolean(a.model), el => el
-          .child(div().flex_1().min_w(COL_GAP))
-          .child(div().text_size(9.5).text_color(t.dim).flex_none().min_w(0).max_w(rowModelMax)
+        .when(Boolean(modelTxt), el => el
+          .child(div().mx(SEP_GAP).w(SEP_W).h(10).flex_none()
+            .bg(hot ? rgba(hotColor, 0.35) : t.border))
+          .child(div().text_size(9.5).text_color(t.dim).flex_1().min_w(0).max_w(rowModelMax)
             .overflow_hidden().whitespace_nowrap()
             .child(modelTxt))));
     }
@@ -2573,6 +2614,7 @@ export default class Routing extends View {
 
     const rowFor = (r) => {
       const agent = r.agent || "?";
+      const agentDisp = agentLabel(agent);
       const group = r.group?.ref || r.group?.id || "";
       const seatKey = r.tries?.length ? this.seatOf(r, r.tries.length - 1) : null;
       const acctRow = seatKey ? this.acctOf(seatKey) : null;
@@ -2580,6 +2622,10 @@ export default class Routing extends View {
       const rawModel = r.served || r.model || "";
       const displayModel = (rawModel && rawModel !== group) ? rawModel : (acctRow?.model || "");
       const model = displayModel || rawModel || "?";
+      const cleanModel = shortModelName(displayModel, r.provider, acct);
+      const badgeRaw = (group && cleanModel && group !== cleanModel)
+        ? `${group} · ${cleanModel}`
+        : (cleanModel || group || "");
       const d = r.time ? new Date(r.time) : null;
       const time = d ? [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, "0")).join(":") : "";
       const tries = r.tries?.length || 0;
@@ -2587,7 +2633,7 @@ export default class Routing extends View {
       const tps = r.done ? this.toksPerS(r) : "";
       const cache = r.done ? this.cacheHit(r) : null;
       const stat = r.done
-        ? `${retry}${this.fmtTok(r.tokens)} tokens · ${this.fmtMs(r.ms)}${tps && tps !== "—" ? ` · ${tps}` : ""}${cache != null ? ` · ${cache}% cached` : ""}`
+        ? `${retry}${this.fmtTok(r.tokens)} tok · ${this.fmtMs(r.ms)}${tps && tps !== "—" ? ` · ${tps}` : ""}${cache != null ? ` · ${cache}% cached` : ""}`
         : `${retry}${this.fmtElapsed(now - new Date(r.time).getTime())}`;
       // the state dot and the seat's name share the request's colour:
       // gold active, green answered, red failed — magpie's row read
@@ -2621,48 +2667,98 @@ export default class Routing extends View {
             .child(div().text_color(t.foreground).truncate().flex_1().min_w(0).child(tName))
             .child(div().text_color(tFail ? "#e26a6a" : t.dim).flex_none().child(tStat));
         })) : null;
-      const rowInnerW = Math.max(120, (g.W + 14) - 4);
-      const plW = g.W < 270 ? 14 : 20;
-      const prefixW = 8 + 5 + 5 + 5;
+      const rowInnerW = Math.max(160, (g.W + 14) - 4);
+      const timeW = this.estTextW(time, 10, false);
+      const topAvail = Math.max(80, rowInnerW - 54 - timeW);
+      const agentMax = Math.min(84, Math.max(32, Math.floor(topAvail * 0.34)));
+      const agentTxt = this.fitText(agentDisp, 11.5, agentMax, true);
+      const afterAgent = Math.max(24, topAvail - this.estTextW(agentTxt, 11.5, true));
+      const acctNeed = this.estTextW(acct, 11, true);
+      const minBadgeTotal = badgeRaw ? 48 : 0;
+      const acctMax = acctNeed + minBadgeTotal <= afterAgent
+        ? acctNeed
+        : Math.max(28, Math.min(110, afterAgent - minBadgeTotal));
+      const acctTxt = this.fitText(acct, 11, acctMax, true);
+      // badge chrome is 22px, not 20: px(6)*2 + border(2) + ml(2) shell = 16,
+      // plus the gap(4) the badge adds as a seventh flex child — the row's
+      // fixed chrome with a badge is 76px (icon 13 + 7 gaps 28 + arrow 12 +
+      // shell 16 + spacer 2 + dot 5), so the text budget must shrink by 2.
+      const badgeRem = afterAgent - this.estTextW(acctTxt, 11, true) - 22;
+      const badgeTxt = (badgeRaw && badgeRem >= 20) ? this.fitText(badgeRaw, 9.5, badgeRem, false) : "";
+
+      const plW = g.W < 270 ? 15 : 17;
+      const line2W = Math.max(100, rowInnerW - plW);
       const statW = this.estTextW(stat, 10, false);
-      const remW = Math.max(0, rowInnerW - plW - prefixW - statW - 8);
-      const acctBudget = remW < 24 ? Math.max(18, remW) : Math.min(110, remW);
-      const acctTxt = this.fitText(acct, 11, acctBudget, true);
-      const afterAcct = remW - this.estTextW(acctTxt, 11, true) - 5;
-      const shownTxt = (shown && afterAcct >= 28) ? this.fitText(`· ${shown}`, 10, Math.min(120, afterAcct), false) : "";
-      const afterShown = shownTxt ? afterAcct - this.estTextW(shownTxt, 10, false) - 5 : afterAcct;
-      const modelTxt = (displayModel && afterShown >= 28) ? this.fitText(`· ${displayModel}`, 10, afterShown, false) : "";
+      const remShown = (r.done && !this.masked && shown) ? (line2W - statW - 8) : 0;
+      const shownDoneTxt = remShown >= 28 ? this.fitText(shown, 10, Math.min(120, remShown), false) : "";
+      const fallbackBadge = (!r.done && !badgeTxt && badgeRaw && line2W - statW - 22 >= 20)
+        ? this.fitText(badgeRaw, 9.5, Math.max(20, line2W - statW - 22), false) : "";
+
+      const activePhase = !r.done
+        ? ((r.firstReasoning && !r.firstText)
+          ? "Thinking"
+          : ((r.estTok > 0 || r.firstText || r.bytes > 0) ? "Streaming" : "Waiting"))
+        : "";
+      const promptTok = !r.done ? (r.prompt?.tokens || r.in || 0) : 0;
+      const estOut = !r.done ? (r.estTok || r.out || 0) : 0;
+      const fmtEstOut = (n) => n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+      const activeMetaParts = [];
+      if (promptTok > 0) activeMetaParts.push(`${this.fmtTok(promptTok)} in`);
+      if (estOut > 0) activeMetaParts.push(`~${fmtEstOut(estOut)} out`);
+      if (!this.masked && shown) activeMetaParts.push(shown);
+      const activeMetaRaw = activeMetaParts.length ? `· ${activeMetaParts.join(" · ")}` : "";
+
+      const activeLeftW = Math.max(0, line2W - statW - 10);
+      const phaseW = activePhase ? this.estTextW(activePhase, 10, true) : 0;
+      const showPhase = !r.done && !fallbackBadge && activeLeftW >= phaseW;
+      const activeMetaBudget = showPhase ? (activeLeftW - phaseW - 4) : 0;
+      const activeMetaTxt = (activeMetaRaw && activeMetaBudget >= 24)
+        ? this.fitText(activeMetaRaw, 10, activeMetaBudget, false) : "";
+
       return v_flex().id(`req-row-${r.id}`).gap(3).px(2).py(7).min_w(0).overflow_hidden().border_b(1).border_color(t.border)
         .cursor_pointer().hover(s => s.bg(t.hover))
         .on_click((_, cx2) => {
           this.expandedRouteId = expanded ? null : r.id;
           cx2.notify();
         })
-        .child(h_flex().items_center().gap(7)
+        .child(h_flex().items_center().gap(4).min_w(0).overflow_hidden()
           .child(iconEl(agent, 13, t.muted, this.providerIcons))
-          .child(div().text_size(11.5).font_semibold().text_color(t.foreground).flex_none().child(agent))
-          .child(group ? div().text_size(9.5).px(5).py(1).rounded(4).bg(t.canvas)
-            .border(1).border_color(t.border).text_color(t.muted).flex_none().child(group) : div().w(0))
-          .child(div().flex_1())
+          .child(div().text_size(11.5).font_semibold().text_color(t.foreground).flex_none().whitespace_nowrap().child(agentTxt))
+          .child(div().text_size(10.5).text_color(t.dim).flex_none().child("→"))
+          .when(Boolean(acctTxt), row => row.child(
+            div().text_size(11).font_semibold().text_color(whoColor).flex_none().whitespace_nowrap().child(acctTxt)))
+          .when(Boolean(badgeTxt), row => row.child(
+            div().ml(2).px(6).py(1).rounded(6).flex_none()
+              .bg(t.canvas).border(1).border_color(t.border)
+              .text_size(9.5).text_color(t.foreground)
+              .overflow_hidden().whitespace_nowrap()
+              .child(badgeTxt)))
+          .child(div().flex_1().min_w(2))
           .child(div().id(`req-dot-${r.id}`).size(5).rounded(3).bg(dotColor).flex_none()
             .when(!r.done, el => el.loop("opacity", { from: 1, to: .35, period: 1100 })))
-          .child(div().text_size(10).text_color(t.dim).flex_none().child(time)))
-        .child(h_flex().items_center().pl(plW).min_w(0).overflow_hidden()
-          .child(h_flex().items_center().gap(5).min_w(0).overflow_hidden()
-            .child(div().text_size(10.5).text_color(t.dim).flex_none().child("→"))
-            .child(div().size(5).rounded(3).bg(dotColor).flex_none())
-            .when(Boolean(acctTxt), row => row.child(
-              div().text_size(11).font_semibold().text_color(whoColor).flex_none().whitespace_nowrap().child(acctTxt)))
-            .when(Boolean(shownTxt), row => row.child(
-              div().text_size(10).text_color(t.dim).flex_none().whitespace_nowrap().child(shownTxt)))
-            .when(Boolean(modelTxt), row => row.child(
-              div().text_size(10).text_color(t.dim).flex_none().whitespace_nowrap().child(modelTxt))))
+          .child(div().text_size(10).text_color(t.dim).flex_none().whitespace_nowrap().child(time)))
+        .when(r.done, el => el.child(h_flex().items_center().gap(6).pl(plW).min_w(0).overflow_hidden()
+          .child(div().text_size(10).text_color(t.dim).min_w(0).overflow_hidden().whitespace_nowrap().child(stat))
+          .when(Boolean(shownDoneTxt), row => row
+            .child(div().flex_1().min_w(4))
+            .child(div().text_size(10).text_color(t.dim).flex_none().whitespace_nowrap().child(shownDoneTxt)))))
+        .when(!r.done, el => el.child(h_flex().items_center().pl(plW).min_w(0).overflow_hidden()
+          .when(Boolean(fallbackBadge), row => row.child(
+            div().px(6).py(1).rounded(6).flex_none()
+              .bg(t.canvas).border(1).border_color(t.border)
+              .text_size(9.5).text_color(t.foreground)
+              .overflow_hidden().whitespace_nowrap()
+              .child(fallbackBadge)))
+          .when(showPhase, row => row.child(h_flex().items_center().gap(4).min_w(0).overflow_hidden()
+            .child(div().text_size(10).font_medium().text_color("#d4b06a").flex_none().whitespace_nowrap().child(activePhase))
+            .when(Boolean(activeMetaTxt), meta => meta.child(
+              div().text_size(10).text_color(t.dim).flex_none().whitespace_nowrap().child(activeMetaTxt)))))
           .child(div().flex_1().min_w(6))
-          .child(div().text_size(10).text_color(t.dim).flex_none().min_w(0).overflow_hidden().whitespace_nowrap().child(stat)))
+          .child(div().text_size(10).text_color(t.dim).flex_none().whitespace_nowrap().child(stat))))
         .when(Boolean(detailBlock), el => el.child(detailBlock));
     };
 
-    const filterLabel = this.selectedAgent || (this.selectedAcct ? (this.acctOf(this.selectedAcct)?.name || this.selectedAcct) : null);
+    const filterLabel = this.selectedAgent ? agentLabel(this.selectedAgent) : (this.selectedAcct ? (this.acctOf(this.selectedAcct)?.name || this.selectedAcct) : null);
     const list = v_flex().id("requests-list").flex_1().min_h(0)
       .overflow_y_scrollbar().px(10).pb(4).gap(0);
     // No sub-headers: a section label that comes and goes with every request
