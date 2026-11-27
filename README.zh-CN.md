@@ -148,7 +148,9 @@ flowchart LR
 
 默认连接本机 `http://127.0.0.1:3425`，并读取 `~/.config/magpie/providers.json` 来发现已安装的供应商。
 
-如果你的 Magpie 运行在通过 `herdr-core` 连接的远端机器上，可复制示例配置：
+如果你的 Magpie 运行在通过 `herdr-core` 连接的远端机器上，先运行 `hc machine ls` 查看 `herdr-core` 中注册的远端机器名（如 `my-remote-machine`）。面板会把网关轮询、配额查询和 `providers.json` 发现经 `herdr-core` 转发到该远端主机执行——无需暴露 3425 端口。
+
+在 macOS / Linux 上，复制示例配置：
 
 ```bash
 cp ~/.config/herdr-app/mods/routing/config.example.json \
@@ -165,6 +167,16 @@ cp ~/.config/herdr-app/mods/routing/config.example.json \
   "demo": false
 }
 ```
+
+在 Windows 上，配置文件位于 `%USERPROFILE%\.config\herdr-app\mods\routing\config.json`。在 PowerShell 中可用单行无 BOM UTF-8 写入（PowerShell 5.1 的 `Set-Content -Encoding UTF8` 会写入 UTF-8 BOM 导致 JSON 解析失败，多行 Here-String 粘贴易出错）：
+
+```powershell
+[IO.File]::WriteAllText("$env:USERPROFILE\.config\herdr-app\mods\routing\config.json", '{"remote":"my-remote-machine","label":"my-remote-machine · 127.0.0.1:3425","baseUrl":"http://127.0.0.1:3425","demo":false}', (New-Object Text.UTF8Encoding $false))
+```
+
+注意：示例路径 `%USERPROFILE%\.config\herdr-app\mods\routing\config.json` 仅适用于默认安装目录；若设置了 `HERDR_APP_HOME` 或 `XDG_CONFIG_HOME`（见上方安装章节的路径优先级说明），请将目标路径改为对应安装目录下的 `mods\routing\config.json`。
+
+注意：`WriteAllText` 会替换整个 `config.json` 文件——仅在新建配置或有意整体覆盖时使用；若文件中已配置 `stageStyle` 等其他字段，请直接编辑原文件以保留现有设置。
 
 </details>
 
