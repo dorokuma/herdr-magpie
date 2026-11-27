@@ -657,6 +657,18 @@ test("install.ps1, the Windows installer, never poisons a successful install's e
   assert.ok(ps1.includes("Get-FileHash -Algorithm SHA256 -LiteralPath"), "the archive is verified with Get-FileHash before anything is installed");
   assert.ok(/for \(\$n = 0; \$n -lt 3; \$n\+\+\)/.test(ps1), "the download retries three times");
   assert.ok(/throw "install\.ps1: checksum mismatch/.test(ps1), "a checksum mismatch throws before anything is unpacked or installed");
+  // and it throws in that order in the script's text, not just somewhere in
+  // it: the rejection must precede both the unpacking and the first byte
+  // copied into the install directory. PowerShell cannot run on the machines
+  // this suite targets, so this is a static ordering guard over the script's
+  // source -- evidence that the gates are sequenced correctly, not runtime
+  // proof of a refusal on Windows.
+  const checksumThrow = ps1.indexOf('throw "install.ps1: checksum mismatch');
+  const unpackTar = ps1.indexOf("& $Tar xzf");
+  const firstCopy = ps1.indexOf("Copy-Item -LiteralPath");
+  assert.ok(checksumThrow >= 0, "the checksum-mismatch throw exists");
+  assert.ok(unpackTar > checksumThrow, "the tar unpack never precedes the checksum gate: a mismatch throws before the archive is unpacked");
+  assert.ok(firstCopy > checksumThrow, "no Copy-Item into the install precedes the checksum gate: a mismatch throws before anything is written");
   assert.ok(ps1.includes("} finally {"), "the temporary folder is cleaned in finally");
   assert.ok(!ps1.includes("herdr-magpie-$V\\install.ps1"), "the downloaded .ps1 is never launched: it would not run under the Restricted policy irm | iex works around");
   // Legacy argument passing is the default before PowerShell 7.3, where the

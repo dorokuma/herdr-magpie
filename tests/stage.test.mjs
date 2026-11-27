@@ -787,8 +787,14 @@ test("stream renders active wires through cached curves, tighter secondary pulse
     assert.equal(hotStatics.length, 0, "hot frame rebuilds no static curve of the crossed wire: makeCurve's cache hit is real");
 
     // And what paint_path actually received, in both frames, is the same
-    // geometry: identical endpoints and widths for both static pieces.
-    const paintedOf = (tree) => {
+    // geometry: identical endpoints and widths for both static pieces. The
+    // pieces are taken out by their own node ids -- wire-glow-pig-anthropic
+    // and wire-core-pig-anthropic -- so the glow's 3.5 and the core's 1.25
+    // can never be mixed up or swapped, the way a width-only filter could
+    // silently trade one for the other.
+    const paintPathOf = (tree, id) => {
+      const el = find(tree, id);
+      assert.notEqual(el, null, `${id} is drawn`);
       const found = [];
       const seen = new Set();
       const walk = (v) => {
@@ -797,30 +803,36 @@ test("stream renders active wires through cached curves, tighter secondary pulse
         const n = v.__node;
         if (!n || seen.has(n)) return;
         seen.add(n);
-        if (n.paintPath?.__path && staticWidths.includes(n.paintPath.__path.width)) {
-          const ops = n.paintPath.__path.ops;
-          if (ops.length >= 2 &&
-            Math.abs(ops[0][1] - crossC.x0) < 0.05 && Math.abs(ops[0][2] - crossC.y0) < 0.05 &&
-            Math.abs(ops.at(-1)[1] - crossC.x3) < 0.05 && Math.abs(ops.at(-1)[2] - crossC.y3) < 0.05) {
-            found.push({ width: n.paintPath.__path.width, ops: ops.map((o) => [...o]) });
-          }
+        if (n.paintPath?.__path) {
+          found.push({ width: n.paintPath.__path.width, ops: n.paintPath.__path.ops.map((o) => [...o]) });
         }
         n.kids.forEach(walk);
       };
-      walk(tree);
-      return found.sort((a, b) => b.width - a.width);
+      walk(el);
+      return found;
     };
-    const coldPainted = paintedOf(tree1);
-    const hotPainted = paintedOf(tree2);
-    assert.equal(coldPainted.length, 2, "paint_path received exactly the glow and the core of the crossed wire in the cold frame");
-    assert.deepEqual(hotPainted, coldPainted,
-      "hot frame paints the crossed wire with endpoints, control points and widths byte-identical to the cold frame");
-    // the endpoint coordinates themselves, for the record: the wire leaves
-    // the pig port at row 3 and lands on the anthropic dot at row 0
-    for (const p of coldPainted) {
-      assert.ok(Math.abs(p.ops[0][2] - crossC.y0) < 0.05, "the painted curve starts at the agent's port height");
-      assert.ok(Math.abs(p.ops.at(-1)[2] - crossC.y3) < 0.05, "the painted curve ends at the account's dot height");
+    const staticPieces = (tree) => {
+      const glow = paintPathOf(tree, "wire-glow-pig-anthropic");
+      assert.equal(glow.length, 1, "the glow node carries exactly one paint_path");
+      assert.equal(glow[0].width, 3.5, "the glow of the crossed wire is stroked 3.5 wide");
+      const core = paintPathOf(tree, "wire-core-pig-anthropic");
+      assert.equal(core.length, 1, "the core node carries exactly one paint_path");
+      assert.equal(core[0].width, 1.25, "the core of the crossed wire is stroked 1.25 wide");
+      return { glow: glow[0], core: core[0] };
+    };
+    const coldPieces = staticPieces(tree1);
+    const hotPieces = staticPieces(tree2);
+    for (const [piece, p] of [["glow", coldPieces.glow], ["core", coldPieces.core]]) {
+      // the endpoint coordinates themselves, for the record: the wire leaves
+      // the pig port at row 3 and lands on the anthropic dot at row 0
+      assert.ok(Math.abs(p.ops[0][1] - crossC.x0) < 0.05 && Math.abs(p.ops[0][2] - crossC.y0) < 0.05,
+        `the ${piece} starts at the agent's port`);
+      assert.ok(Math.abs(p.ops.at(-1)[1] - crossC.x3) < 0.05 && Math.abs(p.ops.at(-1)[2] - crossC.y3) < 0.05,
+        `the ${piece} ends at the account's dot`);
+      assert.ok(p.ops.some(([op]) => op === "cubic_bezier_to"), `the ${piece} is drawn as a cubic, not a line`);
     }
+    assert.deepEqual(hotPieces, coldPieces,
+      "hot frame paints the crossed wire's glow and core with endpoints, control points and widths byte-identical to the cold frame");
 
     for (const [a, k] of pairs) {
       assert.notEqual(find(tree1, `wire-core-${a}-${k}`), null, `${a} -> ${k} stream wire is drawn`);
