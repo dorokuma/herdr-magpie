@@ -205,8 +205,8 @@ const hueOf = (id) => {
 // eased in and out, as a bird glides to land — client.js frame()
 const easeIO = (k) => (1 - Math.cos(Math.PI * k)) / 2;
 const rgba = (hex, a) => {
-  const n = parseInt(hex.slice(1), 16);
-  return `#${hex.slice(1)}${Math.round(a * 255).toString(16).padStart(2, "0")}`;
+  const clamped = Math.max(0, Math.min(1, Number.isFinite(a) ? a : 0));
+  return `#${hex.slice(1)}${Math.round(clamped * 255).toString(16).padStart(2, "0")}`;
 };
 
 export default class Routing extends View {
@@ -260,6 +260,10 @@ export default class Routing extends View {
     this.stageHovered = false;
     this.loadStagePrefs();
     this.demo = false; // config.json's "demo": renders mods/routing/demo.json, asks no gateway
+    this._estWCache = new Map();
+    this._fitCache = new Map();
+    this._flatCache = new Map();
+    this._curveCache = new Map();
 
     cx.spawn(async (cx) => {
       await this.initTarget(cx);
@@ -1104,31 +1108,63 @@ export default class Routing extends View {
   estTextW(s, px, bold = false) {
     // calibrated against measured SF Pro / Inter sans-serif widths so fitText
     // uses available width cleanly without prematurely chopping model names.
+    const str = String(s || "");
+    if (!str) return 0;
+    const cache = this._estWCache;
+    const key = cache ? `${px}|${bold ? 1 : 0}|${str}` : "";
+    if (cache) {
+      const hit = cache.get(key);
+      if (hit !== undefined) return hit;
+    }
     let w = 0;
-    for (const ch of String(s || "")) {
-      const c = ch.charCodeAt(0);
-      if (c > 255) w += px * 1.00;
-      else if (/[mw]/.test(ch)) w += px * 0.80;
-      else if (/[MWGOQD]/.test(ch)) w += px * 0.78;
-      else if (/[A-Z]/.test(ch)) w += px * 0.67;
-      else if (/[0-9]/.test(ch)) w += px * 0.56;
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      // a surrogate pair is one astral code point, counted once as wide
+      // (for..of iteration semantics), the trailing half skipped here
+      if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) { w += px * 1.00; i++; continue; }
+      if (c > 255) { w += px * 1.00; continue; }
+      const ch = str[i];
+      if (ch === "m" || ch === "w") w += px * 0.80;
+      else if (ch === "M" || ch === "W" || ch === "G" || ch === "O" || ch === "Q" || ch === "D" || ch === "%") w += px * 0.78;
+      else if (c >= 65 && c <= 90) w += px * 0.67;
+      else if (c >= 48 && c <= 57) w += px * 0.56;
       else if (ch === "-") w += px * 0.38;
-      else if (/[iIl.,:;|!()[\] tfrj]/.test(ch)) w += px * 0.33;
-      else if (ch === "%") w += px * 0.78;
+      else if (
+        ch === "i" || ch === "I" || ch === "l" || ch === "." || ch === "," ||
+        ch === ":" || ch === ";" || ch === "|" || ch === "!" || ch === "(" ||
+        ch === ")" || ch === "[" || ch === "]" || ch === " " || ch === "t" ||
+        ch === "f" || ch === "r" || ch === "j"
+      ) w += px * 0.33;
       else w += px * 0.53;
     }
     if (bold) w *= 1.04;
-    return w > 0 ? Math.ceil(w) + 1 : 0;
+    const res = w > 0 ? Math.ceil(w) + 1 : 0;
+    if (cache) {
+      if (cache.size > 512) cache.clear();
+      cache.set(key, res);
+    }
+    return res;
   }
 
   // Hard-truncate a string to `budget` px without adding an ellipsis.
   fitText(s, px, budget, bold = false) {
     s = String(s || "");
     if (!s || budget <= 0) return "";
+    const cache = this._fitCache;
+    const key = cache ? `${px}|${bold ? 1 : 0}|${Math.round(budget)}|${s}` : "";
+    if (cache) {
+      const hit = cache.get(key);
+      if (hit !== undefined) return hit;
+    }
     const w = (str) => this.estTextW(str, px, bold);
-    if (w(s) <= budget) return s;
     let out = s;
-    while (out.length > 0 && w(out) > budget) out = out.slice(0, -1);
+    if (w(out) > budget) {
+      while (out.length > 0 && w(out) > budget) out = out.slice(0, -1);
+    }
+    if (cache) {
+      if (cache.size > 512) cache.clear();
+      cache.set(key, out);
+    }
     return out;
   }
 
@@ -1199,8 +1235,7 @@ export default class Routing extends View {
   // dot — the same curve shape magpie's own Routing page draws. There is no
   // Z-shaped detour and no missing vertical piece: the visible wire and the
   // bird's flight are generated from the same cubic, so they meet exactly.
-  curveBetween(ai, si) {
-    const g = this.geometry();
+  curveBetween(ai, si, g = this.geometry()) {
     const a = g.agent(ai), s = g.acct(si);
     if (!a || !s || ai < 0 || si < 0) return null;
     const x0 = a.x2 + 4, y0 = a.cy;
@@ -2284,23 +2319,51 @@ export default class Routing extends View {
     const hovering = Boolean(focusAgent || focusAcct);
     const hasLive = liveAgents.size > 0 && !hovering;
     const orderedWires = [...wirePairs.values()].sort((a, b) => Number(a.live) - Number(b.live));
+    let activeWireCount = 0;
+    for (const w of orderedWires) {
+      const matched = (focusAgent && w.agent === focusAgent) || (focusAcct && w.key === focusAcct);
+      if ((w.live || this.shakes.has(w.key)) && (!hovering || matched)) activeWireCount++;
+    }
     const portDots = new Map();
     const birds = [];
     let activeIdx = 0;
 
     const makeCurve = (c, width) => {
+      const cache = this._curveCache;
+      const key = cache ? `${c.x0.toFixed(1)},${c.y0.toFixed(1)},${c.x3.toFixed(1)},${c.y3.toFixed(1)},${width}` : "";
+      if (cache) {
+        const hit = cache.get(key);
+        if (hit) return hit;
+      }
       const pb = PathBuilder.stroke(width).move_to(c.x0, c.y0);
-      return (Math.abs(c.y3 - c.y0) < 1
+      const path = (Math.abs(c.y3 - c.y0) < 1
         ? pb.line_to(c.x3, c.y3)
         : pb.cubic_bezier_to(c.x3, c.y3, c.mx, c.y0, c.mx, c.y3)
       ).build();
+      if (cache) {
+        if (cache.size > 64) cache.clear();
+        cache.set(key, path);
+      }
+      return path;
+    };
+
+    const getFlat = (c) => {
+      const cache = this._flatCache;
+      const key = cache ? `${c.x0.toFixed(1)},${c.y0.toFixed(1)},${c.x3.toFixed(1)},${c.y3.toFixed(1)}` : "";
+      if (cache && cache.has(key)) return cache.get(key);
+      const poly = this.flat([c.seg]);
+      if (cache) {
+        if (cache.size > 64) cache.clear();
+        cache.set(key, poly);
+      }
+      return poly;
     };
 
     const sliceCurvePath = (poly, s0, s1, width) => {
       if (!poly || s1 - s0 < 0.6) return null;
       const p0 = this.pointAt(poly, s0);
       let pb = PathBuilder.stroke(width).move_to(p0.x, p0.y);
-      const steps = Math.max(1, Math.ceil((s1 - s0) / 1.5));
+      const steps = Math.max(1, Math.ceil((s1 - s0) / 4.5));
       for (let step = 1; step <= steps; step++) {
         const p = this.pointAt(poly, s0 + ((s1 - s0) * step) / steps);
         pb = pb.line_to(p.x, p.y);
@@ -2309,7 +2372,7 @@ export default class Routing extends View {
     };
 
     for (const w of orderedWires) {
-      const c = this.curveBetween(this.agentIndex(w.agent), this.acctIndex(w.key));
+      const c = this.curveBetween(this.agentIndex(w.agent), this.acctIndex(w.key), g);
       if (!c) continue;
       const shaking = this.shakes.has(w.key);
       const color = shaking ? "#e26a6a" : hueOf(w.agent);
@@ -2330,12 +2393,12 @@ export default class Routing extends View {
           children.push(div().id(`wire-core-${w.agent}-${w.key}`).absolute().left(0).top(0).size_full()
             .child(window.paint_path(corePath, rgba(color, 0.24)).absolute().left(0).top(0).size_full()));
 
-          const poly = this.flat([c.seg]);
+          const poly = getFlat(c);
           if (poly && poly.L > 12) {
             const idx = activeIdx++;
             const period = 1600;
             const tailLen = Math.min(56, poly.L * 0.55);
-            const pulses = poly.L > 95 ? [[0, 1.0], [0.5, 0.55]] : [[0, 1.0]];
+            const pulses = (poly.L > 115 && activeWireCount <= 3) ? [[0, 1.0], [0.5, 0.55]] : [[0, 1.0]];
             let arrivalBloom = 0;
 
             for (const [phaseOff, intensity] of pulses) {
@@ -2350,24 +2413,26 @@ export default class Routing extends View {
               }
               if (op <= 0.02 || headS <= tailStart + 0.6) continue;
 
-              // Feathered 5-segment bloom along front 60% of tail
+              // Feathered 2-segment bloom along front 60% of tail (primary pulse)
               const span = headS - tailStart;
-              const bloomStart = tailStart + span * 0.40;
-              const bloomSpan = headS - bloomStart;
-              const bloomSegs = 5;
-              for (let k = 0; k < bloomSegs; k++) {
-                const seg0 = bloomStart + (bloomSpan * k) / bloomSegs;
-                const seg1 = bloomStart + (bloomSpan * (k + 1)) / bloomSegs;
-                const frac = (k + 1) / bloomSegs;
-                const bloomPath = sliceCurvePath(poly, seg0, seg1, 3.6);
-                if (bloomPath) {
-                  children.push(window.paint_path(bloomPath, rgba(color, Math.pow(frac, 2.0) * 0.22 * op))
-                    .absolute().left(0).top(0).size_full());
+              if (intensity >= 0.8) {
+                const bloomStart = tailStart + span * 0.40;
+                const bloomSpan = headS - bloomStart;
+                const bloomSegs = 2;
+                for (let k = 0; k < bloomSegs; k++) {
+                  const seg0 = bloomStart + (bloomSpan * k) / bloomSegs;
+                  const seg1 = bloomStart + (bloomSpan * (k + 1)) / bloomSegs;
+                  const frac = (k + 1) / bloomSegs;
+                  const bloomPath = sliceCurvePath(poly, seg0, seg1, 3.6);
+                  if (bloomPath) {
+                    children.push(window.paint_path(bloomPath, rgba(color, Math.pow(frac, 1.8) * 0.20 * op))
+                      .absolute().left(0).top(0).size_full());
+                  }
                 }
               }
 
-              // Silky 10-segment tapered comet core
-              const segs = 10;
+              // Tapered comet core
+              const segs = intensity >= 0.8 ? 5 : 4;
               for (let k = 0; k < segs; k++) {
                 const seg0 = tailStart + (span * k) / segs;
                 const seg1 = tailStart + (span * (k + 1)) / segs;
@@ -2375,15 +2440,17 @@ export default class Routing extends View {
                 const wSeg = 1.0 + 1.0 * frac;
                 const segPath = sliceCurvePath(poly, seg0, seg1, wSeg);
                 if (segPath) {
-                  children.push(window.paint_path(segPath, rgba(color, Math.pow(frac, 2.2) * 0.88 * op))
+                  children.push(window.paint_path(segPath, rgba(color, Math.pow(frac, 2.0) * 0.88 * op))
                     .absolute().left(0).top(0).size_full());
                 }
               }
 
               // White-hot specular head
               const hp = this.pointAt(poly, headS);
-              children.push(div().absolute().left(hp.x - 5).top(hp.y - 5).size(10).rounded(5)
-                .bg(rgba(color, 0.14 * op)));
+              if (intensity >= 0.8) {
+                children.push(div().absolute().left(hp.x - 5).top(hp.y - 5).size(10).rounded(5)
+                  .bg(rgba(color, 0.14 * op)));
+              }
               children.push(div().absolute().left(hp.x - 2.5).top(hp.y - 2.5).size(5).rounded(2.5)
                 .bg(rgba(color, 0.48 * op)));
               children.push(div().absolute().left(hp.x - 1.1).top(hp.y - 1.1).size(2.2).rounded(1.1)
@@ -2409,7 +2476,7 @@ export default class Routing extends View {
             .child(window.paint_path(corePath, color).absolute().left(0).top(0).size_full()));
 
           if (this.stageStyle === "magpie") {
-            const poly = this.flat([c.seg]);
+            const poly = getFlat(c);
             if (poly && poly.L > 12) {
               const idx = activeIdx++;
               const shuttleMs = 2400;
