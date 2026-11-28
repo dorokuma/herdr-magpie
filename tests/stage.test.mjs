@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { loadMod, find, texts, storage, ROOT, MAIN } from "./harness.mjs";
+import { loadMod, find, texts, storage, tmpdir, ROOT, MAIN } from "./harness.mjs";
 
 // Total recorder nodes in a rendered tree: what one frame costs to build.
 function nodeCount(tree) {
@@ -1630,4 +1630,418 @@ test("quota burn-rate calculation and proactive error/quota alert cooldowns beha
   } finally {
     Date.now = realNow;
   }
+});
+
+test("initTarget treats a missing config.json as default-local, strips a BOM, and never falls back on invalid JSON", async () => {
+  // 1. No config.json at all: default local gateway, CLI controls live,
+  //    local profile listing runs — unchanged behavior for unconfigured installs
+  const noCfgHome = tmpdir("nocfg");
+  const execLog = [];
+  const m = await loadMod({
+    home: noCfgHome,
+    exec: async (_cmd, args) => { execLog.push(args.join(" ")); return { code: 0, stdout: "" }; },
+  });
+  const o = m.make({ offline: "" });
+  await o.initTarget(m.cx);
+  assert.equal(o.configReady, true);
+  assert.equal(o.configError, false);
+  assert.equal(o.cliControlState().targetOk, true);
+  assert.equal(o.cliControlState().writable, true);
+  assert.ok(execLog.some((s) => s.includes("profiles")), "local magpie profiles are listed for a default-local install");
+
+  // 2. A config written by Windows PowerShell 5.1 carries a UTF-8 BOM; it parses
+  const bomHome = tmpdir("bomcfg");
+  fs.mkdirSync(path.join(bomHome, "mods/routing"), { recursive: true });
+  fs.writeFileSync(path.join(bomHome, "mods/routing/config.json"), "\uFEFF" + JSON.stringify({ label: "bom-gateway" }));
+  const mBom = await loadMod({
+    home: bomHome,
+    exec: async () => ({ code: 0, stdout: "" }),
+  });
+  const ob = mBom.make({ offline: "" });
+  await ob.initTarget(mBom.cx);
+  assert.equal(ob.remoteLabel, "bom-gateway", "a BOM-prefixed config.json parses after stripping the BOM");
+  assert.equal(ob.configError, false);
+
+  // 3. config.json exists but is not JSON: never treat the install as
+  //    unconfigured — CLI controls are off and no local magpie is probed
+  const badHome = tmpdir("badcfg");
+  fs.mkdirSync(path.join(badHome, "mods/routing"), { recursive: true });
+  fs.writeFileSync(path.join(badHome, "mods/routing/config.json"), "{ not json !!!");
+  const badLog = [];
+  const mBad = await loadMod({
+    home: badHome,
+    exec: async (_cmd, args) => { badLog.push(args.join(" ")); return { code: 0, stdout: "" }; },
+  });
+  const oBad = mBad.make({ offline: "" });
+  await oBad.initTarget(mBad.cx);
+  assert.equal(oBad.configError, true);
+  const ctl = oBad.cliControlState();
+  assert.equal(ctl.targetOk, false);
+  assert.equal(ctl.writable, false);
+  assert.match(ctl.reason, /invalid/);
+  assert.ok(!badLog.some((s) => s.includes("profiles")), "an invalid config never triggers local profile loading");
+});
+
+test("applyProfile and per-agent writes reject each other while parallel writes of different agents still run", async () => {
+  const cmds = [];
+  const pending = { claude: [], opencode: [], profile: [] };
+  const release = (k) => { const rs = pending[k].splice(0); rs.forEach((r) => r()); return rs.length; };
+  const execMock = async (_cmd, args) => {
+    const raw = args.join(" ");
+    cmds.push(raw);
+    if (raw.includes("'use' 'Saver'")) {
+      await new Promise((res) => pending.profile.push(res));
+      return { code: 0, stdout: "" };
+    }
+    if (raw.includes("'claude' 'claude/sonnet'")) {
+      await new Promise((res) => pending.claude.push(res));
+      return { code: 0, stdout: "" };
+    }
+    if (raw.includes("'opencode' 'opencode/fresh'")) {
+      await new Promise((res) => pending.opencode.push(res));
+      return { code: 0, stdout: "" };
+    }
+    if (raw.includes("effort")) return { code: 0, stdout: "" };
+    return { code: 0, stdout: "  Claude Code  sonnet  ·  effort high  ~/.claude.json\n" };
+  };
+  const m = await loadMod({ home: ROOT, exec: execMock });
+  const o = m.make({ loaded: true, offline: "", configReady: true });
+  o.agentMenu = { cliAgent: "claude", busy: "", error: "" };
+
+  // An agent write in flight blocks the whole-profile switch
+  const writeP = o.setAgentModel("claude", "claude/sonnet", m.cx);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(o.agentWrites.size, 1);
+  await o.applyProfile("Saver", m.cx);
+  assert.ok(!cmds.some((s) => s.includes("'use' 'Saver'")), "profile switch is refused while an agent write is in flight");
+  assert.equal(o.profileBusy, "", "no half-started profile switch remains");
+
+  // Writes of OTHER agents still go through, exactly as before
+  const ocWriteP = o.setAgentModel("oc", "opencode/fresh", m.cx);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.ok(cmds.some((s) => s.includes("'opencode' 'opencode/fresh'")), "a different agent's write is never blocked");
+  assert.equal(o.agentWrites.size, 2);
+  release("opencode");
+  await ocWriteP;
+  release("claude");
+  await writeP;
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(o.agentWrites.size, 0);
+
+  // A profile switch in flight blocks single-agent writes
+  const profP = o.applyProfile("Saver", m.cx);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(o.profileBusy, "Saver");
+  const useCount = cmds.filter((s) => s.includes("'use' 'Saver'")).length;
+  assert.equal(useCount, 1, "the profile switch itself does run");
+  await o.setAgentModel("claude", "claude/sonnet", m.cx);
+  await o.setAgentEffort("claude", "low", m.cx);
+  assert.ok(!cmds.some((s) => s.includes("'effort' 'low'")), "effort write refused during a profile switch");
+  assert.equal(cmds.filter((s) => s.includes("'claude' 'claude/sonnet'")).length, 1,
+    "model write refused during a profile switch");
+  release("profile");
+  await profP;
+  assert.equal(o.profileBusy, "");
+});
+
+test("masked applyProfile failures never leak stderr or exception text, only a classed summary", async () => {
+  const m = await loadMod({
+    home: ROOT,
+    exec: async (_cmd, args) => {
+      const raw = args.join(" ");
+      if (raw.includes("'use'")) {
+        return { code: 2, stderr: "magpie: profile broken: /home/secret-person/.config/magpie/x.json not found" };
+      }
+      return { code: 0, stdout: "" };
+    },
+  });
+  const o = m.make({ loaded: true, offline: "", configReady: true });
+  o.masked = true;
+  await o.applyProfile("Saver", m.cx);
+  assert.equal(m.notes.length, 1);
+  assert.equal(m.notes[0].body.includes("secret-person"), false, "stderr paths never surface while masked");
+  assert.equal(m.notes[0].body.includes("not found"), false, "stderr text never surfaces while masked");
+  assert.match(m.notes[0].body, /^Failed to switch profile \(exit 2\)$/, "masked failure is a classed summary with the exit code");
+
+  m.notes.length = 0;
+  o.masked = false;
+  await o.applyProfile("Saver", m.cx);
+  assert.equal(m.notes.length, 1);
+  assert.match(m.notes[1 - 1].body, /not found/, "unmasked still shows the CLI's own error text");
+
+  // an exception path (exec itself throwing) is a classed summary too
+  m.notes.length = 0;
+  const mThrow = await loadMod({
+    home: ROOT,
+    exec: async () => { throw new Error("spawn /home/secret-person/bin/magpie ENOENT"); },
+  });
+  const ot = mThrow.make({ loaded: true, offline: "", configReady: true });
+  ot.masked = true;
+  await ot.applyProfile("Saver", mThrow.cx);
+  assert.equal(mThrow.notes.length, 1);
+  assert.equal(mThrow.notes[0].body.includes("secret-person"), false);
+  assert.equal(mThrow.notes[0].body, "Failed to switch profile");
+});
+
+test("masked account labels never show an address-bearing alias while chosen aliases stay visible everywhere", async () => {
+  const m = await loadMod({ home: ROOT });
+  const o = m.make({ loaded: true, offline: "", size: { width: 340, height: 600 } });
+
+  // safeAcctAlias: the shared rule
+  o.masked = true;
+  assert.equal(o.safeAcctAlias({ alias: "secret@corp.com", user: "x" }), "", "an @-bearing alias is refused");
+  assert.equal(o.safeAcctAlias({ alias: "secret@corp.com", user: "secret@corp.com" }), "");
+  assert.equal(o.safeAcctAlias({ alias: "Ultra", user: "secret@corp.com" }), "Ultra", "a chosen name carries no address");
+  o.masked = false;
+  assert.equal(o.safeAcctAlias({ alias: "secret@corp.com", user: "x" }), "secret@corp.com", "unmasked shows the alias as-is");
+
+  // The hover card of a masked multi-account provider falls back to Account N
+  o.masked = true;
+  o.quotas = {
+    anthropic: {
+      name: "Anthropic",
+      accounts: [
+        { key: "u:a", num: 1, user: "one@corp.com", alias: "one@corp.com", left: 80, windows: [], allow: [{ label: "5h", left: 80 }] },
+        { key: "u:b", num: 2, user: "two@corp.com", alias: "Ultra", left: 90, windows: [], allow: [{ label: "5h", left: 90 }] },
+      ],
+    },
+  };
+  o.quotaOpen = false;
+  o.hoveredQuotaProv = "anthropic";
+  const card = texts(find(o.render(m.cx), "quota-hover-card")).join(" ");
+  assert.equal(card.includes("one@corp.com"), false, "no address in the masked hover card");
+  assert.match(card, /Account 1/, "refused alias falls back to Account N");
+  assert.match(card, /Ultra/, "a chosen alias still shows in the hover card");
+
+  // The expanded account rows in the open panel share the same rule
+  o.quotaOpen = true;
+  o.expandedProviders = new Set(["anthropic"]);
+  const panelTxt = texts(o.render(m.cx)).join(" ");
+  assert.equal(panelTxt.includes("one@corp.com"), false, "no address in the expanded masked rows");
+  assert.match(panelTxt, /Ultra/, "chosen alias shows in the expanded rows");
+
+  // single account, no multiple numbering: the bare "Account" fallback
+  o.quotas = {
+    anthropic: {
+      name: "Anthropic",
+      accounts: [{ key: "u:a", num: 1, user: "x", alias: "one@corp.com", left: 80, windows: [], allow: [{ label: "5h", left: 80 }] }],
+    },
+  };
+  o.quotaOpen = false;
+  const solo = texts(find(o.render(m.cx), "quota-hover-card")).join(" ");
+  assert.equal(solo.includes("one@corp.com"), false);
+  assert.match(solo, /Account/, "single-account fallback is the bare Account label");
+});
+
+test("masked error notifications name only the provider class and HTTP reason, never the try name", async () => {
+  const m = await loadMod({ home: ROOT });
+  const o = m.make({ loaded: true, offline: "" });
+  o.masked = true;
+  const now = Date.parse("2026-11-28T08:00:00Z");
+  o.maybeAlertError({
+    id: 301,
+    agent: "codex",
+    provider: "anthropic",
+    done: true,
+    status: 500,
+    tries: [{ id: "acct-7", name: "WorkAcct", who: "secret@corp.com", provider: "anthropic", done: true, status: 500 }],
+  }, now);
+  assert.equal(m.notes.length, 1);
+  assert.equal(m.notes[0].body.includes("WorkAcct"), false, "even a non-email try name stays out of the masked notification");
+  assert.equal(m.notes[0].body.includes("secret@corp.com"), false);
+  assert.match(m.notes[0].body, /Codex → anthropic \(500 Server Error\)/, "provider class + status reason only");
+
+  // unmasked still names the account
+  o.masked = false;
+  o.maybeAlertError({
+    id: 302,
+    agent: "codex",
+    provider: "anthropic",
+    done: true,
+    status: 502,
+    tries: [{ id: "acct-8", name: "WorkAcct", who: "secret@corp.com", provider: "anthropic", done: true, status: 502 }],
+  }, now + 150_000);
+  assert.equal(m.notes.length, 2);
+  assert.match(m.notes[1].body, /WorkAcct/);
+});
+
+test("cross-restart trace replies: stale old-process answers are dropped, the new generation resets exactly once", async () => {
+  const m = await loadMod({ home: ROOT });
+  const o = m.make({ loaded: true, offline: "", seq: 49, pid: 100 });
+  const tr = (pid, seq, routes, ids) => ({ object: "trace", pid, seq, routes, ids, totals: { requests: 1, rerouted: 0, errors: 0 } });
+  const doneRoute = (id, agent = "codex") => ({
+    id, agent, done: true, status: 200, time: new Date().toISOString(), ms: 100,
+    tries: [{ id: `seat-${id}`, done: true, status: 200 }],
+  });
+
+  // generation 1: pid 100 owns the stage
+  o.applyTraceSnapshot(tr(100, 50, [doneRoute(1)], [1]), m.cx, { sentAfter: 49, sentPid: 100, sentGen: 0 });
+  assert.equal(o.traceGen, 0, "same-process data is no generation change");
+  assert.ok(o.routes.has(1));
+
+  // A restart happens; two requests of the old generation are still in flight.
+  // The FIRST answer from the new process starts generation 2 and clears once.
+  o.applyTraceSnapshot(tr(200, 10, [doneRoute(50)], [50]), m.cx, { sentAfter: 50, sentPid: 100, sentGen: 0 });
+  assert.equal(o.pid, 200);
+  assert.equal(o.traceGen, 1, "adopting the new process is one generation change");
+  assert.equal(o.routes.has(1), false, "the old generation's routes are cleared once");
+  assert.ok(o.routes.has(50));
+
+  // The SECOND in-flight request also returns the new process: no second clear,
+  // and no drop — it is the same process now in charge.
+  o.applyTraceSnapshot(tr(200, 61, [doneRoute(50), doneRoute(51)], [50, 51]), m.cx, { sentAfter: 50, sentPid: 100, sentGen: 0 });
+  assert.equal(o.traceGen, 1, "the second answer of the same new process must not reset the generation again");
+  assert.equal(o.pid, 200);
+  assert.equal(o.seq, 61);
+  assert.ok(o.routes.has(51), "same-process data is applied, not dropped");
+
+  // A stale answer from the DEAD process arrives after the adoption: dropped outright.
+  o.applyTraceSnapshot(tr(100, 52, [doneRoute(1), doneRoute(2)], [1, 2]), m.cx, { sentAfter: 50, sentPid: 100, sentGen: 0 });
+  assert.equal(o.seq, 61, "a dead-process reply never rolls seq back");
+  assert.equal(o.pid, 200, "a dead-process reply never rolls pid back");
+  assert.equal(o.routes.has(1), false, "dead-process routes never overwrite the live generation");
+  assert.equal(o.routes.has(2), false);
+  assert.ok(o.routes.has(50), "the new generation's routes survive the stale reply");
+
+  // No restart anywhere: an ordinary newer snapshot of the same process applies at once.
+  o.applyTraceSnapshot(tr(200, 62, [doneRoute(50), doneRoute(51), doneRoute(52)], [50, 51, 52]), m.cx, { sentAfter: 61, sentPid: 200, sentGen: 1 });
+  assert.equal(o.seq, 62, "routine same-process updates apply immediately");
+  assert.equal(o.traceGen, 1);
+});
+
+test("recentErr survives history eviction via the remembered completion time and resets on generation change", async () => {
+  const realNow = Date.now;
+  let now = Date.parse("2026-11-28T08:00:00Z");
+  Date.now = () => now;
+  try {
+    const m = await loadMod({ home: ROOT });
+    const o = m.make({ loaded: true, offline: "", seq: 0, pid: 100 });
+    o.quotas = {};
+    // a failed request finished one minute ago, fed through the snapshot path
+    o.applyTraceSnapshot({
+      object: "trace", pid: 100, seq: 5, ids: [1],
+      routes: [{
+        id: 1, agent: "codex", done: true, status: 500,
+        time: new Date(now - 90 * 1000).toISOString(), ms: 30 * 1000, // finished 60s ago
+        tries: [{ id: "s1", done: true, status: 500 }],
+      }],
+    }, m.cx, { sentAfter: 0, sentPid: 100, sentGen: 0 });
+    assert.ok(o.lastErrorDoneAt > 0, "the failure's completion time is remembered");
+
+    // 60 newer successful requests push the failed row out of the buffer —
+    // the eviction the cap performs by age once the history is full
+    for (let i = 2; i <= 62; i++) {
+      o.applyTraceSnapshot({
+        object: "trace", pid: 100, seq: 5 + i, ids: [i],
+        routes: [{ id: i, agent: "codex", done: true, status: 200, time: new Date(now).toISOString(), ms: 100, tries: [{ id: `s${i}`, done: true, status: 200 }] }],
+      }, m.cx, { sentAfter: 4 + i, sentPid: 100, sentGen: 0 });
+    }
+    o.routes.delete(1); // the row eviction: the failed route is gone from the scan
+    assert.equal(o.routes.has(1), false, "the failed row is no longer in the history buffer");
+    o.syncSharedStatus(now);
+    assert.deepEqual(m.shared.get("routing.status"), { active: 0, recentErr: true, lowQuota: false },
+      "the red dot lives on the remembered completion time, not on the row's presence");
+
+    // past the five minutes it expires even though nothing else changed
+    now += 5 * 60 * 1000;
+    o.syncSharedStatus(now);
+    assert.equal(m.shared.get("routing.status").recentErr, false);
+
+    // a generation change (gateway restart) forgets the old failure
+    now = Date.parse("2026-11-28T08:00:00Z") + 60 * 1000;
+    const o2 = m.make({ loaded: true, offline: "", seq: 0, pid: 100 });
+    o2.applyTraceSnapshot({
+      object: "trace", pid: 100, seq: 5, ids: [1],
+      routes: [{ id: 1, agent: "codex", done: true, status: 500, time: new Date(now - 90 * 1000).toISOString(), ms: 30 * 1000, tries: [{ id: "s1", done: true, status: 500 }] }],
+    }, m.cx, { sentAfter: 0, sentPid: 100, sentGen: 0 });
+    assert.ok(o2.lastErrorDoneAt > 0);
+    o2.applyTraceSnapshot({ object: "trace", pid: 200, seq: 1, routes: [], ids: [] }, m.cx, { sentAfter: 5, sentPid: 100, sentGen: 0 });
+    assert.equal(o2.lastErrorDoneAt, 0, "a new generation starts without the old failure's memory");
+    o2.routes.clear();
+    o2.syncSharedStatus(now);
+    assert.equal(m.shared.get("routing.status").recentErr, false);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("providers gone from a valid quota snapshot lose their burn-rate history and alert tier; invalid payloads keep everything", async () => {
+  const realNow = Date.now;
+  let now = Date.parse("2026-11-28T08:00:00Z");
+  Date.now = () => now;
+  try {
+    const m = await loadMod({ home: ROOT });
+    const o = m.make({ loaded: true, offline: "" });
+
+    o.quotas = {
+      codex: { name: "Codex", accounts: [{ allow: [{ label: "5h", left: 30 }] }] },
+      gemini: { name: "Gemini", accounts: [{ allow: [{ label: "5h", left: 40 }] }] },
+    };
+    o.recordQuotaTelemetry(now);
+    now += 30 * 60 * 1000;
+    o.recordQuotaTelemetry(now);
+    assert.ok(o.quotaHistory.has("codex") && o.quotaHistory.has("gemini"));
+    assert.ok(o.prevQuotaTier.has("codex") && o.prevQuotaTier.has("gemini"));
+
+    // a valid snapshot without gemini: its history AND its tier are gone
+    o.quotas = { codex: { name: "Codex", accounts: [{ allow: [{ label: "5h", left: 25 }] }] } };
+    o.recordQuotaTelemetry(now);
+    assert.ok(!o.quotaHistory.has("gemini"), "vanished provider loses its burn-rate history");
+    assert.ok(!o.prevQuotaTier.has("gemini"), "vanished provider loses its alert tier");
+    assert.ok(!o.prevQuotaLeft.has("gemini"), "vanished provider loses its previous reading");
+    assert.ok(o.quotaHistory.has("codex"), "surviving providers are untouched");
+
+    // a valid EMPTY snapshot: everything is cleaned
+    o.quotas = o.groupQuotaEntries([], now);
+    assert.deepEqual(Object.keys(o.quotas), []);
+    o.recordQuotaTelemetry(now);
+    assert.equal(o.quotaHistory.size, 0, "a valid empty snapshot clears every provider");
+    assert.equal(o.prevQuotaTier.size, 0);
+
+    // an invalid payload never reaches recordQuotaTelemetry: the last state stands
+    const m2 = await loadMod({
+      home: ROOT,
+      exec: async () => ({ code: 0, stdout: JSON.stringify({ error: { message: "bad payload" } }) }),
+    });
+    const o2 = m2.make({ loaded: true, offline: "" });
+    o2.quotas = { codex: { name: "Codex", accounts: [{ allow: [{ label: "5h", left: 30 }] }] } };
+    o2.recordQuotaTelemetry(now);
+    const histBefore = o2.quotaHistory.get("codex").length;
+    await assert.rejects(o2.fetchQuotas(m2.cx), /bad payload/);
+    assert.ok(o2.quotaHistory.has("codex"));
+    assert.equal(o2.quotaHistory.get("codex").length, histBefore, "a failed fetch changes nothing");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("expanded account bars read a reported {left: 0, windows: []} as Exhausted, aligned with the hover card", async () => {
+  const m = await loadMod({ home: ROOT });
+  const o = m.make({ loaded: true, offline: "", size: { width: 340, height: 600 } });
+  const mkQuotas = (left) => ({
+    codex: {
+      name: "Codex",
+      accounts: [
+        { key: "u:a", num: 1, alias: "Pro", user: "one@corp.com", left, windows: [], allow: [{ label: "5h", left }] },
+        { key: "u:b", num: 2, alias: "Ultra", user: "two@corp.com", left: 80, windows: [], allow: [{ label: "5h", left: 80 }] },
+      ],
+    },
+  });
+  o.masked = true;
+  o.quotaOpen = true;
+  o.expandedProviders = new Set(["codex"]);
+  o.expandedAccounts = new Set(["codex::u:a"]);
+
+  o.quotas = mkQuotas(0);
+  const zeroTxt = texts(o.render(m.cx)).join(" ");
+  assert.match(zeroTxt, /Exhausted/, "an account at exactly 0 reads as exhausted in the expanded bars");
+  assert.equal(zeroTxt.includes("Plenty Of Juice"), false, "never the green plenty-of-juice line");
+
+  o.quotas = mkQuotas(0.4);
+  const fracTxt = texts(o.render(m.cx)).join(" ");
+  assert.match(fracTxt, /Exhausted/, "0.4 rounds to 0, so it is exhausted — the same rounding the hover card uses");
+
+  o.quotas = mkQuotas(3);
+  const someTxt = texts(o.render(m.cx)).join(" ");
+  assert.equal(someTxt.includes("Exhausted"), false, "a remaining share is not exhausted");
 });

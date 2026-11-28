@@ -353,6 +353,7 @@ export default class Routing extends View {
     this.remoteLabel = "localhost · 127.0.0.1:3425";
     this.baseUrl = DEFAULT_BASE_URL;
     this.configReady = false;
+    this.configError = false; // config.json exists but does not parse: never fall back to default-local CLI control
     this.providerIcons = new Map();
     this.totals = { requests: 0, rerouted: 0, errors: 0 };
     this.agents = [];   // [{id, color}]
@@ -408,6 +409,10 @@ export default class Routing extends View {
     this.agentWriteDoneSeq = new Map();
     this.traceGen = 0;
     this.traceInFlight = null;
+    // when the newest failed request of this generation finished, kept even
+    // after its route row falls off the 60-entry history — the red dot in
+    // the tab bar measures real time, not how many rows are still buffered
+    this.lastErrorDoneAt = 0;
     this.quotaFetchSeq = 0;
     this.quotaInFlight = null;
     this.quotaHistory = new Map();
@@ -471,6 +476,7 @@ export default class Routing extends View {
   cliControlState() {
     if (this.demo) return { targetOk: false, writable: false, reason: "Disabled in demo mode" };
     if (!this.configReady) return { targetOk: false, writable: false, reason: "Loading configuration…" };
+    if (this.configError) return { targetOk: false, writable: false, reason: "config.json is invalid — CLI controls disabled" };
     if (this.remote) return { targetOk: false, writable: false, reason: "CLI controls unavailable for remote gateway" };
     const norm = String(this.baseUrl || DEFAULT_BASE_URL).replace(/\/$/, "").toLowerCase();
     const def = DEFAULT_BASE_URL.replace(/\/$/, "").toLowerCase();
@@ -485,17 +491,28 @@ export default class Routing extends View {
 
   async initTarget(cx) {
     let cfg = null;
+    let rawCfg = null;
     try {
-      const raw = await readTextFile(`${appHome()}/mods/routing/config.json`);
-      if (raw) {
-        cfg = JSON.parse(raw);
+      rawCfg = await readTextFile(`${appHome()}/mods/routing/config.json`);
+    } catch (_) { rawCfg = null; /* no config.json: the default local gateway, as before */ }
+    if (rawCfg) {
+      try {
+        // a config written by Windows PowerShell 5.1 carries a UTF-8 BOM,
+        // which JSON.parse rejects outright — strip the BOM, never the data
+        cfg = JSON.parse(String(rawCfg).replace(/^\uFEFF/, ""));
         if (cfg.remote !== undefined) this.remote = cfg.remote || null;
         if (cfg.baseUrl) this.baseUrl = String(cfg.baseUrl).replace(/\/$/, "");
         if (cfg.label) this.remoteLabel = String(cfg.label);
         else if (this.remote) this.remoteLabel = `${this.remote} · ${this.baseUrl.replace(/^https?:\/\//, "")}`;
         if (cfg.stageStyle && STAGE_STYLES.includes(cfg.stageStyle)) this.stageStyle = cfg.stageStyle;
+      } catch (_) {
+        // the file is there but does not parse: that is a broken install,
+        // not an unconfigured one. Refusing CLI control beats silently
+        // treating the gateway as the default local one and writing into
+        // the wrong magpie's agent configs.
+        this.configError = true;
       }
-    } catch (_) { /* optional config.json */ }
+    }
     if (cfg?.demo) {
       this.demo = true;
       await this.loadDemo(cx);
@@ -629,14 +646,27 @@ export default class Routing extends View {
     } catch (_) { /* optional discovery */ }
   }
 
-  applyTraceSnapshot(d, cx, { sentAfter = this.seq, sentPid = this.pid, fromPoll = false } = {}) {
+  // sentAfter/sentPid/sentGen are read off the live state when the request
+  // goes out, not when the answer comes back: a gateway restart in between
+  // is exactly what they are for. A snapshot of a process that no longer
+  // exists must never roll seq or routes back; a snapshot of a new process
+  // starts a new generation exactly once, however many in-flight requests
+  // of the old generation report it.
+  applyTraceSnapshot(d, cx, { sentAfter = this.seq, sentPid = this.pid, sentGen = this.traceGen, fromPoll = false } = {}) {
     if (!d || d.object !== "trace") throw new Error(d?.error?.message || "not a trace");
-    const pidChanged = d.pid != null && sentPid != null && d.pid !== sentPid;
-    if (!pidChanged && sentAfter !== this.seq && d.seq <= this.seq) return false;
-    if (d.seq < this.seq || pidChanged) {
+    // A generation change after the request went out plus a reply pid that
+    // is not the process now in charge: the answer comes from the dead one,
+    // and applying it would roll seq back over the new gateway's routes.
+    // The second in-flight answer of the NEW process passes this test
+    // (its pid IS this.pid) and is applied without a second clear below.
+    if (sentGen !== this.traceGen && d.pid !== this.pid) return false;
+    const newProcess = d.pid != null && this.pid != null && d.pid !== this.pid;
+    if (!newProcess && sentAfter !== this.seq && d.seq <= this.seq) return false;
+    if (d.seq < this.seq || newProcess) {
       this.routes.clear();
       this.flights.clear();
       this.notifiedErrors.clear();
+      this.lastErrorDoneAt = 0;
       this.traceGen += 1;
     }
     this.seq = d.seq;
@@ -658,6 +688,9 @@ export default class Routing extends View {
       this.routes.set(r.id, r);
       if (isNew && (!first || !r.done)) toStart.push(r);
       if (r.done && r.status >= 400) {
+        const startedAt = r.time ? Date.parse(r.time) : NaN;
+        const finishedAt = Number.isFinite(startedAt) ? startedAt + Math.max(0, Number(r.ms) || 0) : NaN;
+        if (Number.isFinite(finishedAt) && finishedAt > (this.lastErrorDoneAt || 0)) this.lastErrorDoneAt = finishedAt;
         if (first) this.notifiedErrors.add(r.id);
         else if (!prev?.done) this.maybeAlertError(r);
       }
@@ -682,10 +715,11 @@ export default class Routing extends View {
       try {
         const sentAfter = this.seq;
         const sentPid = this.pid;
+        const sentGen = this.traceGen;
         const url = `${this.baseUrl}/v1/magpie/trace?after=${sentAfter}${this.loaded ? "&wait=1" : ""}`;
         const r = await exec("curl", ["-sS", "--max-time", "35", url], this.execOpts(40000));
         const d = JSON.parse(r.stdout);
-        this.applyTraceSnapshot(d, cx, { sentAfter, sentPid, fromPoll: true });
+        this.applyTraceSnapshot(d, cx, { sentAfter, sentPid, sentGen, fromPoll: true });
       } catch (e) {
         this.failCount = (this.failCount || 0) + 1;
         if (!this.routes.size || this.failCount >= 3) {
@@ -699,6 +733,20 @@ export default class Routing extends View {
         await cx.sleep(4000);
       }
     }
+  }
+
+  // The account label a masked panel may show. An alias that contains an
+  // account address (@), or that is nothing but the address spelled again
+  // (alias === user), leaks exactly what masked mode exists to hide: it is
+  // refused and the caller falls back to "Account N". A real chosen name
+  // (Ultra, Pro, Spare 1) carries no address and stays visible.
+  safeAcctAlias(q) {
+    const alias = String(q?.alias || "").trim();
+    if (!alias) return "";
+    if (!this.masked) return alias;
+    if (alias.includes("@")) return "";
+    if (alias === String(q?.user || "").trim()) return "";
+    return alias;
   }
 
   winLeft(w) {
@@ -1186,11 +1234,12 @@ export default class Routing extends View {
       try {
         const sentAfter = this.seq;
         const sentPid = this.pid;
+        const sentGen = this.traceGen;
         const url = `${this.baseUrl}/v1/magpie/trace?after=${sentAfter}`;
         const r = await exec("curl", ["-sS", "--max-time", "15", url], this.execOpts(20000));
         const d = JSON.parse(r?.stdout || "{}");
         if (d?.object === "trace") {
-          this.applyTraceSnapshot(d, cx, { sentAfter, sentPid, fromPoll: false });
+          this.applyTraceSnapshot(d, cx, { sentAfter, sentPid, sentGen, fromPoll: false });
         }
       } catch (_) { /* keep existing state */ }
       finally {
@@ -1875,7 +1924,9 @@ export default class Routing extends View {
   }
 
   async applyProfile(name, cx) {
-    if (!this.cliControlState().writable || this.profileBusy) return;
+    // a profile switch rewrites every agent's config at once: it never runs
+    // beside a single-agent write, and never beside another profile switch
+    if (!this.cliControlState().writable || this.profileBusy || this.agentWrites.size > 0) return;
     this.profileBusy = name;
     cx?.notify();
     try {
@@ -1885,11 +1936,16 @@ export default class Routing extends View {
         this.profileMenuOpen = false;
         notify({ title: "Magpie Profile", level: "success", timeout: 4000, body: `Switched to ${name}` });
       } else {
-        const msg = stripAnsi(r?.stderr || r?.stdout || "failed").trim().split(/\r?\n/).pop();
-        notify({ title: "Magpie Profile Error", level: "error", timeout: 6000, body: msg || `magpie use ${name} failed` });
+        // stderr carries the profile's file paths and model ids; masked
+        // privacy mode answers with a classed summary instead
+        const msg = this.masked
+          ? `Failed to switch profile${r?.code != null ? ` (exit ${r.code})` : ""}`
+          : stripAnsi(r?.stderr || r?.stdout || "failed").trim().split(/\r?\n/).pop() || `magpie use ${name} failed`;
+        notify({ title: "Magpie Profile Error", level: "error", timeout: 6000, body: msg });
       }
     } catch (e) {
-      notify({ title: "Magpie Profile Error", level: "error", timeout: 6000, body: String(e?.message || e) });
+      notify({ title: "Magpie Profile Error", level: "error", timeout: 6000,
+        body: this.masked ? "Failed to switch profile" : String(e?.message || e) });
     } finally {
       this.profileBusy = "";
       cx?.notify();
@@ -1960,7 +2016,10 @@ export default class Routing extends View {
   async setAgentModel(agentId, modelId, cx) {
     if (!this.cliControlState().writable) return;
     const cliAgent = resolveCliAgent(agentId);
-    if (!cliAgent || this.agentWrites.has(cliAgent)) return;
+    // a profile switch in flight rewrites this agent's config too: a
+    // single-agent write never starts beside it. Writes of OTHER agents
+    // stay parallel, as they always were.
+    if (!cliAgent || this.profileBusy || this.agentWrites.has(cliAgent)) return;
     const seq = ++this.agentWriteSeq;
     this.agentWrites.set(cliAgent, { op: modelId, seq });
     if (this.agentMenu?.cliAgent === cliAgent) {
@@ -2004,7 +2063,7 @@ export default class Routing extends View {
   async setAgentEffort(agentId, effort, cx) {
     if (!this.cliControlState().writable) return;
     const cliAgent = resolveCliAgent(agentId);
-    if (!cliAgent || this.agentWrites.has(cliAgent)) return;
+    if (!cliAgent || this.profileBusy || this.agentWrites.has(cliAgent)) return;
     const op = `effort:${effort}`;
     const seq = ++this.agentWriteSeq;
     this.agentWrites.set(cliAgent, { op, seq });
@@ -2105,15 +2164,14 @@ export default class Routing extends View {
       this.quotaHistory.set(provId, hist);
       this.maybeAlertQuota(provId, provLabel(group.name || provId), left, now);
     }
+    // a provider missing from a valid snapshot has been removed from the
+    // gateway: its burn-rate history and its alert tier go with it, so a
+    // re-added provider starts clean instead of inheriting a stale decline
     for (const provId of [...this.quotaHistory.keys()]) {
       if (!Object.hasOwn(quotas, provId)) {
-        const hist = (this.quotaHistory.get(provId) || []).filter((p) => p.ts >= cutoff);
-        if (hist.length) this.quotaHistory.set(provId, hist);
-        else {
-          this.quotaHistory.delete(provId);
-          this.prevQuotaLeft.delete(provId);
-          this.prevQuotaTier.delete(provId);
-        }
+        this.quotaHistory.delete(provId);
+        this.prevQuotaLeft.delete(provId);
+        this.prevQuotaTier.delete(provId);
       }
     }
   }
@@ -2156,12 +2214,13 @@ export default class Routing extends View {
       (!lastTry.id && lastTry.who && o.who === lastTry.who)) : null;
     const seat = lastTry ? this.seatEntry(r, lastTry) : null;
     const acctRow = seat?.key ? this.acctOf(seat.key) : null;
-    const explicitName = provLabel(lastTry?.name || tryMeta?.name || "");
     const safeProvider = provLabel(r.provider || lastTry?.provider || tryMeta?.provider || "");
+    // masked mode names only the provider class plus the HTTP status: even a
+    // try name that carries no @ can be a person's account id, so it stays
+    // out of the notification. The cooldown key still uses seat.key, which
+    // never leaves the process.
     const acct = this.masked
-      ? ((explicitName && explicitName !== seat?.who && explicitName !== acctRow?.who && !explicitName.includes("@"))
-        ? explicitName
-        : (safeProvider || "provider"))
+      ? (safeProvider || "provider")
       : (acctRow?.name || seat?.name || safeProvider || "provider");
     const key = `err:${seat?.key || safeProvider || "provider"}`;
     const lastAt = this.alertCooldowns.get(key) || 0;
@@ -2194,6 +2253,11 @@ export default class Routing extends View {
       if (r.status >= 400 && Number.isFinite(finishedAt) && (now - finishedAt) < 5 * 60 * 1000) {
         recentErr = true;
       }
+    }
+    // a failure whose row has already been evicted by 60 newer successes
+    // keeps its five minutes through the remembered completion time
+    if (!recentErr && this.lastErrorDoneAt && (now - this.lastErrorDoneAt) < 5 * 60 * 1000) {
+      recentErr = true;
     }
     let lowQuota = false;
     for (const group of Object.values(this.quotas || {})) {
@@ -2601,6 +2665,13 @@ export default class Routing extends View {
           barRows.push(div().text_size(9.5).text_color("#34d399").child(`${q.balance} left`));
         } else if (!wins.length && q.error) {
           barRows.push(div().text_size(8.5).text_color(t.dim).child(`Balance: ${shortQuotaError(q.error, this.masked)}`));
+        } else if (!wins.length && typeof q.left === "number" && Number.isFinite(q.left) && Math.round(q.left) <= 0) {
+          // an account that reports nothing but an empty share reads as
+          // exhausted in the hover card; the expanded bars read the same,
+          // never the green plenty-of-juice line of an untouched account
+          barRows.push(h_flex().items_center().gap(6)
+            .child(div().size(5).rounded(2.5).bg("#e26a6a").flex_none())
+            .child(div().text_size(9).font_semibold().text_color("#e26a6a").child("Exhausted")));
         } else if (!wins.length) {
           barRows.push(h_flex().items_center().gap(6)
             .child(div().size(5).rounded(2.5).bg("#34d399").flex_none())
@@ -2627,8 +2698,9 @@ export default class Routing extends View {
           const q = accounts[0];
           const { barRows, nextReset } = buildAccountBars(q, nameW);
           const badgeParts = [];
-          if (q.alias) badgeParts.push(q.alias);
-          if (q.plan && q.plan.toLowerCase() !== String(q.alias || "").toLowerCase()) {
+          const safeAlias = this.safeAcctAlias(q);
+          if (safeAlias) badgeParts.push(safeAlias);
+          if (q.plan && q.plan.toLowerCase() !== safeAlias.toLowerCase()) {
             badgeParts.push(titleCase(q.plan));
           }
           const badge = badgeParts.join(" · ");
@@ -2680,7 +2752,7 @@ export default class Routing extends View {
         const plans = accounts.map((a) => (a.plan ? titleCase(a.plan) : "")).filter(Boolean);
         const sharedPlan = plans.length === accounts.length && new Set(plans).size === 1 ? plans[0] : "";
         const subNameW = Math.max(64, nameW - 6);
-        const baseLabels = accounts.map((q, idx) => q.alias
+        const baseLabels = accounts.map((q, idx) => this.safeAcctAlias(q)
           ? (!this.masked && q.user ? `${q.alias} · ${q.user}` : q.alias)
           : (!this.masked && q.user ? q.user : `Account ${q.num || idx + 1}`));
         const labelCounts = new Map();
@@ -2844,7 +2916,7 @@ export default class Routing extends View {
         const accts = this.orderedAccounts(id, group.accounts);
         for (let idx = 0; idx < accts.length; idx++) {
           const q = accts[idx];
-          const lbl = q.alias || (!this.masked && q.user ? q.user : (accts.length > 1 ? `Account ${q.num || idx + 1}` : ""));
+          const lbl = this.safeAcctAlias(q) || (!this.masked && q.user ? q.user : (accts.length > 1 ? `Account ${q.num || idx + 1}` : ""));
           const parts = [];
           for (const h of q.allow || []) {
             const p = h.pace && h.long ? `${Math.round(h.pace.left)}% / ${Math.round(h.long.left)}%` : `${Math.round(h.left)}%`;
@@ -3846,7 +3918,7 @@ export default class Routing extends View {
       const accts = this.orderedAccounts(provId, group.accounts || []);
       const rate = this.burnRateOf(provId);
       const acctCards = accts.slice(0, 4).map((q, idx) => {
-        const lbl = q.alias || (!this.masked && q.user ? q.user : (accts.length > 1 ? `Account ${q.num || idx + 1}` : "Account"));
+        const lbl = this.safeAcctAlias(q) || (!this.masked && q.user ? q.user : (accts.length > 1 ? `Account ${q.num || idx + 1}` : "Account"));
         const planTxt = q.plan ? String(q.plan).replace(/\b([a-z])([a-z]*)\b/g, (_, a, b) => a.toUpperCase() + b) : "";
         const showPlan = planTxt && planTxt.toLowerCase() !== lbl.toLowerCase();
         const dotCol = q.left != null
