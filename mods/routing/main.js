@@ -494,23 +494,43 @@ export default class Routing extends View {
     let rawCfg = null;
     try {
       rawCfg = await readTextFile(`${appHome()}/mods/routing/config.json`);
-    } catch (_) { rawCfg = null; /* no config.json: the default local gateway, as before */ }
-    if (rawCfg) {
-      try {
-        // a config written by Windows PowerShell 5.1 carries a UTF-8 BOM,
-        // which JSON.parse rejects outright — strip the BOM, never the data
-        cfg = JSON.parse(String(rawCfg).replace(/^\uFEFF/, ""));
-        if (cfg.remote !== undefined) this.remote = cfg.remote || null;
-        if (cfg.baseUrl) this.baseUrl = String(cfg.baseUrl).replace(/\/$/, "");
-        if (cfg.label) this.remoteLabel = String(cfg.label);
-        else if (this.remote) this.remoteLabel = `${this.remote} · ${this.baseUrl.replace(/^https?:\/\//, "")}`;
-        if (cfg.stageStyle && STAGE_STYLES.includes(cfg.stageStyle)) this.stageStyle = cfg.stageStyle;
-      } catch (_) {
-        // the file is there but does not parse: that is a broken install,
-        // not an unconfigured one. Refusing CLI control beats silently
-        // treating the gateway as the default local one and writing into
-        // the wrong magpie's agent configs.
+    } catch (e) {
+      // Only a genuinely absent file means "no config": the default local
+      // gateway, as before. Every other read failure (a permission error, a
+      // directory where the file should be, a host or harness spelling of
+      // the error this machine does not produce) is a broken install, not
+      // an unconfigured one — refusing CLI control beats silently writing
+      // into the wrong magpie's agent configs.
+      const msg = String(e?.message || e);
+      const notFound = e?.code === "ENOENT"
+        || /ENOENT|no such file|not found/i.test(msg);
+      if (notFound) rawCfg = null;
+      else { rawCfg = null; this.configError = true; }
+    }
+    if (rawCfg != null) {
+      // a config written by Windows PowerShell 5.1 carries a UTF-8 BOM,
+      // which JSON.parse rejects outright — strip the BOM, never the data
+      const stripped = String(rawCfg).replace(/^\uFEFF/, "");
+      if (!stripped.trim()) {
+        // zero bytes or whitespace only: no config was ever written, but the
+        // file IS there — refusing CLI control beats guessing at a default
+        // local gateway a person may not run
         this.configError = true;
+      } else {
+        try {
+          cfg = JSON.parse(stripped);
+          if (cfg.remote !== undefined) this.remote = cfg.remote || null;
+          if (cfg.baseUrl) this.baseUrl = String(cfg.baseUrl).replace(/\/$/, "");
+          if (cfg.label) this.remoteLabel = String(cfg.label);
+          else if (this.remote) this.remoteLabel = `${this.remote} · ${this.baseUrl.replace(/^https?:\/\//, "")}`;
+          if (cfg.stageStyle && STAGE_STYLES.includes(cfg.stageStyle)) this.stageStyle = cfg.stageStyle;
+        } catch (_) {
+          // the file is there but does not parse: that is a broken install,
+          // not an unconfigured one. Refusing CLI control beats silently
+          // treating the gateway as the default local one and writing into
+          // the wrong magpie's agent configs.
+          this.configError = true;
+        }
       }
     }
     if (cfg?.demo) {
@@ -646,20 +666,20 @@ export default class Routing extends View {
     } catch (_) { /* optional discovery */ }
   }
 
-  // sentAfter/sentPid/sentGen are read off the live state when the request
-  // goes out, not when the answer comes back: a gateway restart in between
-  // is exactly what they are for. A snapshot of a process that no longer
+  // sentAfter/sentGen are read off the live state when the request goes
+  // out, not when the answer comes back: a gateway restart in between is
+  // exactly what they are for. A snapshot of a process that no longer
   // exists must never roll seq or routes back; a snapshot of a new process
   // starts a new generation exactly once, however many in-flight requests
   // of the old generation report it.
-  applyTraceSnapshot(d, cx, { sentAfter = this.seq, sentPid = this.pid, sentGen = this.traceGen, fromPoll = false } = {}) {
+  applyTraceSnapshot(d, cx, { sentAfter = this.seq, sentGen = this.traceGen, fromPoll = false } = {}) {
     if (!d || d.object !== "trace") throw new Error(d?.error?.message || "not a trace");
-    // A generation change after the request went out plus a reply pid that
-    // is not the process now in charge: the answer comes from the dead one,
-    // and applying it would roll seq back over the new gateway's routes.
-    // The second in-flight answer of the NEW process passes this test
-    // (its pid IS this.pid) and is applied without a second clear below.
-    if (sentGen !== this.traceGen && d.pid !== this.pid) return false;
+    // The generation moved on since this request went out: the answer
+    // belongs to the dead or superseded one — the same pid restarted or a
+    // lingering reply of the old process — and applying it would roll seq
+    // and routes back over the gateway now in charge. Whatever it carries,
+    // it is dropped outright.
+    if (sentGen !== this.traceGen) return false;
     const newProcess = d.pid != null && this.pid != null && d.pid !== this.pid;
     if (!newProcess && sentAfter !== this.seq && d.seq <= this.seq) return false;
     if (d.seq < this.seq || newProcess) {
@@ -690,7 +710,11 @@ export default class Routing extends View {
       if (r.done && r.status >= 400) {
         const startedAt = r.time ? Date.parse(r.time) : NaN;
         const finishedAt = Number.isFinite(startedAt) ? startedAt + Math.max(0, Number(r.ms) || 0) : NaN;
-        if (Number.isFinite(finishedAt) && finishedAt > (this.lastErrorDoneAt || 0)) this.lastErrorDoneAt = finishedAt;
+        // a remote gateway whose clock runs ahead would stretch the red
+        // dot's five minutes by however much it is fast — the failure's
+        // completion time never sits in the local future
+        const doneAt = Number.isFinite(finishedAt) ? Math.min(finishedAt, Date.now()) : NaN;
+        if (Number.isFinite(doneAt) && doneAt > (this.lastErrorDoneAt || 0)) this.lastErrorDoneAt = doneAt;
         if (first) this.notifiedErrors.add(r.id);
         else if (!prev?.done) this.maybeAlertError(r);
       }
@@ -714,12 +738,11 @@ export default class Routing extends View {
     for (;;) {
       try {
         const sentAfter = this.seq;
-        const sentPid = this.pid;
         const sentGen = this.traceGen;
         const url = `${this.baseUrl}/v1/magpie/trace?after=${sentAfter}${this.loaded ? "&wait=1" : ""}`;
         const r = await exec("curl", ["-sS", "--max-time", "35", url], this.execOpts(40000));
         const d = JSON.parse(r.stdout);
-        this.applyTraceSnapshot(d, cx, { sentAfter, sentPid, sentGen, fromPoll: true });
+        this.applyTraceSnapshot(d, cx, { sentAfter, sentGen, fromPoll: true });
       } catch (e) {
         this.failCount = (this.failCount || 0) + 1;
         if (!this.routes.size || this.failCount >= 3) {
@@ -745,7 +768,7 @@ export default class Routing extends View {
     if (!alias) return "";
     if (!this.masked) return alias;
     if (alias.includes("@")) return "";
-    if (alias === String(q?.user || "").trim()) return "";
+    if (alias.toLowerCase() === String(q?.user || "").trim().toLowerCase()) return "";
     return alias;
   }
 
@@ -1233,13 +1256,12 @@ export default class Routing extends View {
     this.traceInFlight = (async () => {
       try {
         const sentAfter = this.seq;
-        const sentPid = this.pid;
         const sentGen = this.traceGen;
         const url = `${this.baseUrl}/v1/magpie/trace?after=${sentAfter}`;
         const r = await exec("curl", ["-sS", "--max-time", "15", url], this.execOpts(20000));
         const d = JSON.parse(r?.stdout || "{}");
         if (d?.object === "trace") {
-          this.applyTraceSnapshot(d, cx, { sentAfter, sentPid, sentGen, fromPoll: false });
+          this.applyTraceSnapshot(d, cx, { sentAfter, sentGen, fromPoll: false });
         }
       } catch (_) { /* keep existing state */ }
       finally {
@@ -1928,8 +1950,8 @@ export default class Routing extends View {
     // beside a single-agent write, and never beside another profile switch
     if (!this.cliControlState().writable || this.profileBusy || this.agentWrites.size > 0) return;
     this.profileBusy = name;
-    cx?.notify();
     try {
+      cx?.notify();
       const r = await this.runMagpieCli(["use", name], 15000);
       if (r?.code === 0) {
         this.activeProfile = name;
@@ -2007,7 +2029,9 @@ export default class Routing extends View {
         ...this.agentMenu,
         loading: false,
         busy: this.agentWrites.get(cliAgent)?.op || "",
-        error: String(e?.message || e).slice(0, 140),
+        error: this.masked
+          ? "Failed to load agent status"
+          : String(e?.message || e).slice(0, 140),
       };
     }
     cx?.notify();
@@ -2022,11 +2046,11 @@ export default class Routing extends View {
     if (!cliAgent || this.profileBusy || this.agentWrites.has(cliAgent)) return;
     const seq = ++this.agentWriteSeq;
     this.agentWrites.set(cliAgent, { op: modelId, seq });
-    if (this.agentMenu?.cliAgent === cliAgent) {
-      this.agentMenu = { ...this.agentMenu, busy: modelId, error: "" };
-    }
-    cx?.notify();
     try {
+      if (this.agentMenu?.cliAgent === cliAgent) {
+        this.agentMenu = { ...this.agentMenu, busy: modelId, error: "" };
+      }
+      cx?.notify();
       const r = await this.runMagpieCli([cliAgent, modelId], 12000);
       if (r?.code === 0) {
         const stRes = await this.runMagpieCli([cliAgent], 8000).catch(() => null);
@@ -2042,14 +2066,18 @@ export default class Routing extends View {
         }
         notify({ title: agentLabel(agentId), level: "success", timeout: 3500, body: `Model → ${modelId}` });
       } else {
-        const msg = stripAnsi(r?.stderr || r?.stdout || "failed").trim().split(/\r?\n/).pop();
+        // stderr carries the agent's config paths; masked privacy mode
+        // answers with a classed summary instead
+        const msg = this.masked
+          ? `Failed to switch model${r?.code != null ? ` (exit ${r.code})` : ""}`
+          : stripAnsi(r?.stderr || r?.stdout || "failed").trim().split(/\r?\n/).pop() || "Failed to switch model";
         if (this.agentMenu?.cliAgent === cliAgent) {
-          this.agentMenu = { ...this.agentMenu, error: msg || "Failed to switch model" };
+          this.agentMenu = { ...this.agentMenu, error: msg };
         }
       }
     } catch (e) {
       if (this.agentMenu?.cliAgent === cliAgent) {
-        this.agentMenu = { ...this.agentMenu, error: String(e?.message || e) };
+        this.agentMenu = { ...this.agentMenu, error: this.masked ? "Failed to switch model" : String(e?.message || e) };
       }
     } finally {
       if (this.agentWrites.get(cliAgent)?.seq === seq) this.agentWrites.delete(cliAgent);
@@ -2067,11 +2095,11 @@ export default class Routing extends View {
     const op = `effort:${effort}`;
     const seq = ++this.agentWriteSeq;
     this.agentWrites.set(cliAgent, { op, seq });
-    if (this.agentMenu?.cliAgent === cliAgent) {
-      this.agentMenu = { ...this.agentMenu, busy: op, error: "" };
-    }
-    cx?.notify();
     try {
+      if (this.agentMenu?.cliAgent === cliAgent) {
+        this.agentMenu = { ...this.agentMenu, busy: op, error: "" };
+      }
+      cx?.notify();
       const r = await this.runMagpieCli([cliAgent, "effort", effort], 12000);
       if (r?.code === 0) {
         this.agentWriteDoneSeq.set(cliAgent, seq);
@@ -2080,14 +2108,16 @@ export default class Routing extends View {
         }
         notify({ title: agentLabel(agentId), level: "success", timeout: 3000, body: `Effort → ${effort}` });
       } else {
-        const msg = stripAnsi(r?.stderr || r?.stdout || "failed").trim().split(/\r?\n/).pop();
+        const msg = this.masked
+          ? `Failed to set effort${r?.code != null ? ` (exit ${r.code})` : ""}`
+          : stripAnsi(r?.stderr || r?.stdout || "failed").trim().split(/\r?\n/).pop() || "Failed to set effort";
         if (this.agentMenu?.cliAgent === cliAgent) {
-          this.agentMenu = { ...this.agentMenu, error: msg || "Failed to set effort" };
+          this.agentMenu = { ...this.agentMenu, error: msg };
         }
       }
     } catch (e) {
       if (this.agentMenu?.cliAgent === cliAgent) {
-        this.agentMenu = { ...this.agentMenu, error: String(e?.message || e) };
+        this.agentMenu = { ...this.agentMenu, error: this.masked ? "Failed to set effort" : String(e?.message || e) };
       }
     } finally {
       if (this.agentWrites.get(cliAgent)?.seq === seq) this.agentWrites.delete(cliAgent);
@@ -2167,7 +2197,15 @@ export default class Routing extends View {
     // a provider missing from a valid snapshot has been removed from the
     // gateway: its burn-rate history and its alert tier go with it, so a
     // re-added provider starts clean instead of inheriting a stale decline
-    for (const provId of [...this.quotaHistory.keys()]) {
+    // the scan walks the union of all three tables' keys, never only
+    // quotaHistory: burnRateOf() prunes a stale provider out of quotaHistory
+    // on read, and a tier/left residue must not outlive its history
+    const staleKeys = new Set([
+      ...this.quotaHistory.keys(),
+      ...this.prevQuotaLeft.keys(),
+      ...this.prevQuotaTier.keys(),
+    ]);
+    for (const provId of staleKeys) {
       if (!Object.hasOwn(quotas, provId)) {
         this.quotaHistory.delete(provId);
         this.prevQuotaLeft.delete(provId);
@@ -2217,10 +2255,14 @@ export default class Routing extends View {
     const safeProvider = provLabel(r.provider || lastTry?.provider || tryMeta?.provider || "");
     // masked mode names only the provider class plus the HTTP status: even a
     // try name that carries no @ can be a person's account id, so it stays
-    // out of the notification. The cooldown key still uses seat.key, which
-    // never leaves the process.
+    // out of the notification — and a provider string that itself carries
+    // an account address (@) never stands in for the class either. The
+    // cooldown key still uses seat.key, which never leaves the process.
+    const maskedProvider = safeProvider.includes("@")
+      ? provLabel(lastTry?.provider || tryMeta?.provider || "")
+      : safeProvider;
     const acct = this.masked
-      ? (safeProvider || "provider")
+      ? ((maskedProvider.includes("@") ? "" : maskedProvider) || "provider")
       : (acctRow?.name || seat?.name || safeProvider || "provider");
     const key = `err:${seat?.key || safeProvider || "provider"}`;
     const lastAt = this.alertCooldowns.get(key) || 0;
@@ -3836,7 +3878,7 @@ export default class Routing extends View {
     if (showAgentMenu) {
       const m = this.agentMenu;
       const cliAgent = m.cliAgent || resolveCliAgent(m.agent);
-      const isBusy = Boolean(m.busy || (cliAgent && this.agentWrites.has(cliAgent)));
+      const isBusy = Boolean(m.busy || this.profileBusy || (cliAgent && this.agentWrites.has(cliAgent)));
       const activeModel = (m.models || []).find((x) =>
         m.currentModel && (x.id === m.currentModel || x.id.endsWith(`/${m.currentModel}`)));
       const efforts = activeModel?.efforts?.length
@@ -3901,11 +3943,16 @@ export default class Routing extends View {
           .when(Boolean(this.profileBusy), el => el.child(div().text_size(9).text_color(t.accent).child(`Switching ${this.profileBusy}…`))))
         .children(this.profiles.map((p) => {
           const isCur = p.name === this.activeProfile;
-          return v_flex().id(`pick-profile-${p.name}`).px(6).py(4).gap(2).rounded(5).cursor_pointer()
+          // a single-agent write in flight rewrites its config; a profile
+          // switch rewrites them all — the options are read-only then,
+          // greyed and dead to clicks, mirroring the popover's own models
+          const writeInFlight = this.agentWrites.size > 0;
+          return v_flex().id(`pick-profile-${p.name}`).px(6).py(4).gap(2).rounded(5)
             .bg(isCur ? t.selected : t.canvas)
             .border(1).border_color(isCur ? t.accent : t.border)
-            .hover(s => s.bg(t.hover))
-            .on_click((_, cx2) => { cx2.stop_propagation(); this.spawnAction(cx2, (cx3) => this.applyProfile(p.name, cx3)); })
+            .when(writeInFlight, el => el.opacity(0.55))
+            .when(!writeInFlight, el => el.cursor_pointer().hover(s => s.bg(t.hover))
+              .on_click((_, cx2) => { cx2.stop_propagation(); this.spawnAction(cx2, (cx3) => this.applyProfile(p.name, cx3)); }))
             .child(h_flex().items_center().justify_between()
               .child(div().text_size(10).font_semibold().text_color(isCur ? t.foreground : t.muted).child(p.name))
               .when(isCur, el => el.child(div().text_size(9).text_color(t.accent).child("active"))))
