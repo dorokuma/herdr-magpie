@@ -81,13 +81,21 @@ export default class Tabs extends View {
     this.syncPanel(space, panel, body, enabled);
     const panelButton = (id, label, icon) => {
       const on = panel && !panel.hidden && body?.active === id;
+      const rStat = id === "routing" ? shared("routing.status") : null;
+      const rActive = Boolean(rStat?.active > 0);
+      const rWarn = !rActive && Boolean(rStat?.recentErr || rStat?.lowQuota);
       return h_flex().id(`panel-${id}`).h(26).px(8).gap(5).flex_none().items_center().rounded(6)
         .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
         .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
         .on_click(() => {
           if (on) run("layout.hide", { id: "panel" });
           else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
-        }).child(svg(icon).size(14)).child(label);
+        })
+        .child(svg(icon).size(14))
+        .child(label)
+        .when(rActive, el => el.child(div().id("routing-tab-dot").size(6).rounded(3).bg("#facc15")
+          .loop("opacity", { from: 1, to: 0.35, period: 1100 })))
+        .when(rWarn, el => el.child(div().id("routing-tab-dot").size(6).rounded(3).bg("#e26a6a")));
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })

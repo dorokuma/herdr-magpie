@@ -933,3 +933,257 @@ test("minimal stage style skips intermediate fly-frame redraws without dropping 
     Date.now = realNow;
   }
 });
+
+test("expanded diagnostic card shows prompt composition, timing waterfall, affinity, and masking while keeping try list last", async () => {
+  const m = await loadMod();
+  const o = m.make({ loaded: true, offline: "", size: { width: 340, height: 600 } });
+  o.agents = [{ id: "codex", color: "#5e95d7" }];
+  o.accounts = [{ key: "codex", name: "Codex", model: "gpt-6.2-sol" }];
+  o.routes.set(10, {
+    id: 10,
+    agent: "codex",
+    model: "codex/gpt-6.2-sol",
+    served: "gpt-6.2-sol",
+    effort: "max",
+    time: new Date("2026-11-28T08:00:00Z").toISOString(),
+    done: true,
+    status: 200,
+    tokens: 148000,
+    in: 400,
+    out: 1300,
+    ttft: 11200,
+    firstReasoning: 700,
+    firstText: 11200,
+    flow: 2700,
+    masking: 380,
+    ms: 14280,
+    usage: [{ in: 400, cache_read: 146000 }],
+    prompt: {
+      window: 500000,
+      tokens: 146304,
+      turns: 66,
+      parts: [
+        { kind: "system", tokens: 15284 },
+        { kind: "results", tokens: 74210 },
+        { kind: "chat", tokens: 35278 },
+        { kind: "tools", tokens: 10146 },
+      ],
+    },
+    affinity: { kept: true, cacheRead: 132736, why: "turn" },
+    masked: { n: 14, kinds: { SECRET: 6, PASSWORD: 1 } },
+    tries: [{ id: "codex", name: "Codex", status: 200, ms: 13900, done: true }],
+  });
+  o.expandedRouteId = 10;
+
+  const row = texts(find(o.render(m.cx), "req-row-10"));
+  assert.ok(row.includes("Context 146k / 500k"), row.join(" | "));
+  assert.ok(row.includes("29% · 66 turns"), row.join(" | "));
+  assert.ok(row.some((s) => s.includes("results 51%")), row.join(" | "));
+  assert.ok(row.some((s) => s.includes("Mask 380ms")), row.join(" | "));
+  assert.ok(row.some((s) => s.includes("Think 10.5s")), row.join(" | "));
+  assert.ok(row.some((s) => s.includes("Stream 2.7s")), row.join(" | "));
+  assert.ok(row.includes("Affinity kept (133k)"), row.join(" | "));
+  assert.ok(row.includes("14 masked (6 SECRET · 1 PASSWORD)"), row.join(" | "));
+  assert.ok(row.includes("effort max"), row.join(" | "));
+  assert.deepEqual(row.slice(-3), ["#1", "Codex", "200 · 13.9s"], "tries remain last inside detailBlock");
+});
+
+test("semantic error rows and header status filters toggle active/error buckets cleanly", async () => {
+  const m = await loadMod();
+  const o = m.make({ loaded: true, offline: "", size: { width: 340, height: 600 } });
+  o.agents = [{ id: "codex", color: "#5e95d7" }];
+  o.accounts = [{ key: "codex", name: "Codex", model: "gpt-6.2-sol" }];
+  o.routes.set(1, {
+    id: 1, agent: "codex", model: "codex/gpt-6.2-sol", served: "gpt-6.2-sol",
+    time: new Date("2026-11-28T08:00:00Z").toISOString(),
+    done: false, tries: [{ id: "codex", name: "Codex", done: false }],
+  });
+  o.routes.set(2, {
+    id: 2, agent: "codex", model: "codex/gpt-6.2-sol", served: "gpt-6.2-sol",
+    time: new Date("2026-11-28T07:59:00Z").toISOString(),
+    done: true, status: 429, tokens: 0, ms: 11700,
+    tries: [{ id: "codex", name: "Codex", status: 429, ms: 11700, done: true }],
+  });
+  o.routes.set(3, {
+    id: 3, agent: "codex", model: "codex/gpt-6.2-sol", served: "gpt-6.2-sol",
+    time: new Date("2026-11-28T07:58:00Z").toISOString(),
+    done: true, status: 200, tokens: 12000, ms: 3200, in: 100, out: 200,
+    tries: [{ id: "codex", name: "Codex", status: 200, ms: 3200, done: true }],
+  });
+
+  const treeAll = o.render(m.cx);
+  assert.ok(texts(find(treeAll, "filter-errors")).includes("1 err"));
+  assert.ok(texts(find(treeAll, "filter-active")).includes("1 active"));
+  assert.ok(texts(find(treeAll, "req-row-2")).includes("429 Rate Limit · 11.7s"));
+
+  o.statusFilter = "error";
+  const treeErr = o.render(m.cx);
+  assert.equal(find(treeErr, "req-row-1"), null);
+  assert.notEqual(find(treeErr, "req-row-2"), null);
+  assert.equal(find(treeErr, "req-row-3"), null);
+
+  o.statusFilter = "active";
+  const treeAct = o.render(m.cx);
+  assert.notEqual(find(treeAct, "req-row-1"), null);
+  assert.equal(find(treeAct, "req-row-2"), null);
+
+  // Without any failed routes, filter-errors chip disappears cleanly
+  o.statusFilter = null;
+  o.routes.delete(2);
+  assert.equal(find(o.render(m.cx), "filter-errors"), null);
+});
+
+test("magpie CLI quick-switch menus parse agent status, models, effort, and profiles and dispatch CLI commands", async () => {
+  const calls = [];
+  const execMock = async (cmd, args) => {
+    calls.push([cmd, ...args]);
+    const raw = args.join(" ");
+    if (raw.includes("magpie 'profiles'") || raw === "profiles") {
+      return {
+        code: 0,
+        stdout: "  Default  agy Orchestrator (Neon) · codex gpt-6.2-sol\n  Saver    codex gpt-6-astra\n",
+      };
+    }
+    if (raw.includes("'models' 'codex'") || raw === "models codex") {
+      return {
+        code: 0,
+        stdout: [
+          "  Codex",
+          "  codex/gpt-6.2-sol       GPT-6.2-Sol  low/medium/high/xhigh/max/ultra",
+          "  codex/gpt-6-astra       GPT-6-Astra  low/medium/high/xhigh/max",
+          "  codex is shown only the models picked for it: 45 not picked",
+          "  Codex: 6 more models in its list, not exposed (not picked): old-model",
+        ].join("\n"),
+      };
+    }
+    if (raw.includes("magpie 'codex' 'effort' 'medium'") || raw === "codex effort medium") {
+      return { code: 0, stdout: "" };
+    }
+    if (raw.includes("magpie 'codex' 'codex/gpt-6-astra'") || raw === "codex codex/gpt-6-astra") {
+      return { code: 0, stdout: "" };
+    }
+    if (raw.includes("magpie 'use' 'Saver'") || raw === "use Saver") {
+      return { code: 0, stdout: "" };
+    }
+    if (raw.includes("magpie 'codex'") || raw === "codex") {
+      return { code: 0, stdout: "  Codex  gpt-6.2-sol  ·  effort max  ·  memories codex/gpt-6.2-sol  ~/.codex/config.toml\n" };
+    }
+    return { code: 0, stdout: "" };
+  };
+
+  const m = await loadMod({ home: ROOT, exec: execMock });
+  const o = m.make({ loaded: true, offline: "", size: { width: 368, height: 600 } });
+  o.agents = [{ id: "codex", color: "#5e95d7" }];
+  o.accounts = [{ key: "codex", name: "Codex", model: "gpt-6.2-sol" }];
+
+  await o.loadProfiles(m.cx);
+  assert.equal(o.profiles.length, 2);
+  assert.equal(o.activeProfile, "Default");
+
+  await o.openAgentMenu("codex", 0, m.cx);
+  assert.equal(o.agentMenu.currentModel, "gpt-6.2-sol");
+  assert.equal(o.agentMenu.currentEffort, "max");
+  assert.deepEqual(o.agentMenu.models.map((x) => x.id), ["codex/gpt-6.2-sol", "codex/gpt-6-astra"]);
+
+  const popTree = o.render(m.cx);
+  assert.notEqual(find(popTree, "agent-menu-popover"), null);
+  assert.notEqual(find(popTree, "effort-medium"), null);
+  assert.notEqual(find(popTree, "pick-model-codex/gpt-6-astra"), null);
+
+  await o.setAgentEffort("codex", "medium", m.cx);
+  assert.equal(o.agentMenu.currentEffort, "medium");
+  await o.setAgentModel("codex", "codex/gpt-6-astra", m.cx);
+  assert.ok(calls.some((c) => c.join(" ").includes("'codex' 'effort' 'medium'")));
+  assert.ok(calls.some((c) => c.join(" ").includes("'codex' 'codex/gpt-6-astra'")));
+
+  o.closeMenus(m.cx);
+  o.profileMenuOpen = true;
+  assert.notEqual(find(o.render(m.cx), "profile-menu-popover"), null);
+  await o.applyProfile("Saver", m.cx);
+  assert.equal(o.activeProfile, "Saver");
+  assert.equal(o.profileMenuOpen, false);
+});
+
+test("quota burn-rate calculation and proactive error/quota alert cooldowns behave cleanly", async () => {
+  const realNow = Date.now;
+  let now = Date.parse("2026-11-28T08:00:00Z");
+  Date.now = () => now;
+  try {
+    const store = storage();
+    const m = await loadMod({ home: ROOT, store });
+    const o = m.make({ loaded: true, offline: "" });
+    assert.equal(o.alertsEnabled, true);
+
+    o.quotas = { codex: { name: "Codex", accounts: [{ allow: [{ label: "5h", left: 30 }] }] } };
+    o.recordQuotaTelemetry(now);
+    assert.equal(m.notes.length, 0);
+
+    // 30m later, quota drops by 18% -> burn ~36%/h and crosses <=15% alert threshold
+    now += 30 * 60 * 1000;
+    o.quotas = {
+      codex: {
+        name: "Codex",
+        accounts: [{
+          key: "codex-main",
+          alias: "Pro",
+          balance: "62500 credits",
+          left: 12,
+          windows: [{ name: "7 days", used: 88, remaining: 12, resetsAt: "2026-11-28T11:30:00Z" }],
+          allow: [{ label: "7d", left: 12 }],
+        }],
+      },
+    };
+    o.recordQuotaTelemetry(now);
+    const rate = o.burnRateOf("codex");
+    assert.equal(rate.pctPerHr, 36);
+    assert.equal(m.notes.length, 1);
+    assert.match(m.notes[0].title, /Low Quota: Codex/);
+    assert.match(m.notes[0].body, /12% remaining · ~36%\/h/);
+
+    // Collapsed quota hover card shows structured window details + burn rate without blocking backdrop
+    o.quotaOpen = false;
+    o.hoveredQuotaProv = "codex";
+    const hoverTree = o.render(m.cx);
+    assert.equal(find(hoverTree, "popover-backdrop"), null);
+    const hoverCard = find(hoverTree, "quota-hover-card");
+    assert.notEqual(hoverCard, null);
+    assert.match(texts(hoverCard).join(" "), /62500 credits/);
+    assert.match(texts(hoverCard).join(" "), /~36%\/h/);
+
+    // Expanded quota view hides hover card and renders inline burn-rate badge on provider header
+    o.quotaOpen = true;
+    const expandedTree = o.render(m.cx);
+    assert.equal(find(expandedTree, "quota-hover-card"), null);
+    assert.match(texts(find(expandedTree, "quota-prov-hdr-codex")).join(" "), /~36%\/h/);
+
+    // Repeat within 15m cooldown -> no duplicate notification
+    now += 5 * 60 * 1000;
+    o.quotas = { codex: { name: "Codex", accounts: [{ allow: [{ label: "5h", left: 10 }] }] } };
+    o.recordQuotaTelemetry(now);
+    assert.equal(m.notes.length, 1);
+
+    // Failed route fires one notification per cooldown
+    o.maybeAlertError({ id: 99, agent: "codex", provider: "codex", done: true, status: 429 }, now);
+    assert.equal(m.notes.length, 2);
+    assert.match(m.notes[1].body, /Codex → codex \(429 Rate Limit\)/);
+
+    // Shared top-bar status reflects lowQuota, active, and recentErr cleanly
+    o.syncSharedStatus(now);
+    assert.deepEqual(m.shared.get("routing.status"), { active: 0, recentErr: false, lowQuota: true });
+    o.routes.set(1, { id: 1, done: false });
+    o.routes.set(2, { id: 2, done: true, status: 429, time: new Date(now).toISOString() });
+    o.quotas = { codex: { name: "Codex", accounts: [{ allow: [{ label: "5h", left: 90 }] }] } };
+    o.syncSharedStatus(now);
+    assert.deepEqual(m.shared.get("routing.status"), { active: 1, recentErr: true, lowQuota: false });
+
+    // Muting persists and suppresses notifications
+    o.toggleAlerts(m.cx);
+    assert.equal(o.alertsEnabled, false);
+    assert.equal(store.data.get("routing.alerts"), "false");
+    now += 20 * 60 * 1000;
+    o.maybeAlertError({ id: 100, agent: "codex", provider: "codex", done: true, status: 500 }, now);
+    assert.equal(m.notes.length, 2);
+  } finally {
+    Date.now = realNow;
+  }
+});

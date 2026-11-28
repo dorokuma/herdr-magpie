@@ -7,7 +7,7 @@
 
 import { View, div, svg, image, PathBuilder } from "gpui-kit";
 import { h_flex, v_flex, Scrollbar } from "gpui-base";
-import { theme, exec, settings, appHome, readTextFile, notify, window as herdrWindow } from "herdr";
+import { theme, exec, settings, appHome, readTextFile, notify, setShared, window as herdrWindow } from "herdr";
 // `window` here is gpui-shell's global window object (its paint_path is an
 // element constructor), not herdr's window() — a function that only reports
 // metadata. Importing the herdr one shadows the global and breaks render.
@@ -195,6 +195,101 @@ const shortModelName = (model, provider, acct) => {
   return m;
 };
 
+const HTTP_REASONS = Object.assign(Object.create(null), {
+  400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
+  408: "Timeout", 429: "Rate Limit", 500: "Server Error", 502: "Bad Gateway",
+  503: "Unavailable", 504: "Gateway Timeout", 529: "Overloaded",
+});
+
+const PROMPT_PART_COLORS = Object.assign(Object.create(null), {
+  system: "#64748b", tools: "#8b5cf6", skills: "#06b6d4",
+  memory: "#10b981", results: "#f59e0b", chat: "#3b82f6",
+});
+
+const PROMPT_PART_NAMES = Object.assign(Object.create(null), {
+  system: "sys", tools: "tools", skills: "skills",
+  memory: "mem", results: "results", chat: "chat",
+});
+
+const stripAnsi = (s) => String(s ?? "").replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+const shellQuote = (s) => `'${String(s ?? "").replace(/'/g, "'\\''")}'`;
+
+const parseAgentStatus = (stdout) => {
+  for (const raw of stripAnsi(stdout).split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    if (!line.startsWith("  ") || /^\s*(magpie:|20\d\d\/|!)/.test(line)) continue;
+    const effortMatch = /·\s*effort\s+([a-z0-9_-]+)/i.exec(line);
+    const cols = line.trim().split(/\s{2,}/);
+    const modelRaw = cols[1] && cols[1] !== "—" && !cols[1].startsWith("http") ? cols[1].trim() : "";
+    return {
+      model: modelRaw.replace(/^magpie\//, ""),
+      effort: effortMatch ? effortMatch[1].toLowerCase() : "",
+    };
+  }
+  return { model: "", effort: "" };
+};
+
+const parseAgentModels = (stdout) => {
+  const models = [];
+  const seen = new Set();
+  for (const raw of stripAnsi(stdout).split(/\r?\n/)) {
+    if (/^\s+\S+\s+is shown\b/i.test(raw) || /:\s+\d+\s+more models/i.test(raw)) break;
+    const m = /^\s{2}([a-zA-Z0-9._:@-]+\/[a-zA-Z0-9._:@/-]+)\s{2,}(.+?)(?:\s{2,}((?:[a-z0-9-]+\/)+[a-z0-9-]+))?\s*$/.exec(raw);
+    if (!m) continue;
+    const id = m[1].trim();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    models.push({
+      id,
+      label: m[2].trim(),
+      efforts: m[3] ? m[3].trim().split("/") : [],
+    });
+  }
+  return models;
+};
+
+const parseProfiles = (stdout) => {
+  const out = [];
+  for (const raw of stripAnsi(stdout).split(/\r?\n/)) {
+    if (!/^\s{2}[^\s]/.test(raw)) continue;
+    if (/^\s*(magpie:|20\d\d\/|\+|!)/.test(raw)) continue;
+    const m = /^\s{2}([^\s:]+)\s{2,}(.+)$/.exec(raw);
+    if (m) out.push({ name: m[1].trim(), summary: m[2].trim() });
+  }
+  return out;
+};
+
+const computeTimingPhases = (r) => {
+  if (!r?.done || !(r.ms > 0)) return [];
+  const total = Math.round(r.ms);
+  const tr = r.tries?.[r.tries.length - 1];
+  const mask = Math.max(0, Math.round(r.masking || 0));
+  const netObj = tr?.net;
+  const tlsAndConn = netObj ? ((netObj.pool || ((netObj.dns || 0) + (netObj.connect || 0) + (netObj.tls || 0))) + (netObj.send || 0) + (netObj.wait || 0)) : 0;
+  let net = Math.max(0, Math.round(tlsAndConn));
+  let think = (r.firstReasoning != null && r.firstText != null && r.firstText > r.firstReasoning)
+    ? Math.round(r.firstText - r.firstReasoning)
+    : Math.max(0, Math.round(r.reasoning || 0));
+  let stream = r.flow > 0 ? Math.round(r.flow) : 0;
+  if (!net && !think && !stream && r.ttft != null) {
+    net = Math.max(0, Math.round(r.ttft - mask));
+    stream = Math.max(0, Math.round(total - r.ttft));
+  } else if (!stream && r.ttft != null && total > r.ttft + think) {
+    stream = Math.max(0, Math.round(total - r.ttft - think));
+  }
+  const raw = [
+    mask >= 20 ? { label: "Mask", ms: mask, color: "#8b5cf6" } : null,
+    net >= 20 ? { label: "Net", ms: net, color: "#06b6d4" } : null,
+    think >= 20 ? { label: "Think", ms: think, color: "#f59e0b" } : null,
+    stream >= 20 ? { label: "Stream", ms: stream, color: "#10b981" } : null,
+  ].filter(Boolean);
+  if (!raw.length) return [];
+  const sum = raw.reduce((s, p) => s + p.ms, 0);
+  if (sum <= 0) return [];
+  const scale = sum > total ? total / sum : 1;
+  return raw.map((p) => ({ ...p, ms: Math.max(1, Math.round(p.ms * scale)) }));
+};
+
 const hueOf = (id) => {
   const s = String(id || "");
   if (HUES[s] !== undefined) return PALETTE[HUES[s]];
@@ -259,6 +354,20 @@ export default class Routing extends View {
     this.stageStyle = "minimal";
     this.stageHovered = false;
     this.loadStagePrefs();
+    this.statusFilter = null; // null | "active" | "error"
+    this.agentMenu = null;    // { agent, rowIndex, loading, busy, error, currentModel, currentEffort, models }
+    this.profileMenuOpen = false;
+    this.hoveredQuotaProv = null;
+    this.profiles = [];
+    this.profileBusy = "";
+    this.activeProfile = "";
+    this.quotaHistory = new Map();
+    this.alertsEnabled = true;
+    this.alertCooldowns = new Map();
+    this.prevQuotaLeft = new Map();
+    this.notifiedErrors = new Set();
+    this._lastSharedSig = "";
+    this.loadAlertPrefs();
     this.demo = false; // config.json's "demo": renders mods/routing/demo.json, asks no gateway
     this._estWCache = new Map();
     this._fitCache = new Map();
@@ -328,6 +437,7 @@ export default class Routing extends View {
     }
     this.configReady = true;
     this.discoverProviders().then(() => cx.notify()).catch(() => {});
+    this.loadProfiles(cx).catch(() => {});
     this.readModVersion().then(() => {
       this.announceVersion();
       cx.notify();
@@ -473,9 +583,14 @@ export default class Routing extends View {
               this.providerIcons.set(String(o.provider).toLowerCase(), String(o.icon));
             }
           }
-          const isNew = !this.routes.has(r.id);
+          const prev = this.routes.get(r.id);
+          const isNew = !prev;
           this.routes.set(r.id, r);
           if (isNew && (!first || !r.done)) toStart.push(r);
+          if (r.done && r.status >= 400) {
+            if (first) this.notifiedErrors.add(r.id);
+            else if (!prev?.done) this.maybeAlertError(r);
+          }
         }
         this.trimRoutes(d.ids);
         this.loaded = true;
@@ -483,6 +598,7 @@ export default class Routing extends View {
         if (this.offline) this.maybeCheckUpdate(cx, "online");
         this.offline = "";
         this.recompute();
+        this.syncSharedStatus();
         for (const r of toStart) if (this.routes.has(r.id)) this.start(r);
         cx.notify();
       } catch (e) {
@@ -946,8 +1062,11 @@ export default class Routing extends View {
       const r = await exec("curl", ["-sS", "--max-time", "20", `${this.baseUrl}/v1/magpie/quotas`],
         this.execOpts(25000));
       const d = JSON.parse(r.stdout);
-      this.quotas = this.groupQuotaEntries(d.data || [], Date.now());
-      this.quotasAt = Date.now();
+      const qNow = Date.now();
+      this.quotas = this.groupQuotaEntries(d.data || [], qNow);
+      this.quotasAt = qNow;
+      this.recordQuotaTelemetry(qNow);
+      this.syncSharedStatus();
       cx.notify();
     } finally {
       const held = Date.now() - t0;
@@ -1089,6 +1208,7 @@ export default class Routing extends View {
     // take free slots; nothing hops around and nothing flickers
     this.agents = this.stable(this.agents, agents, "id", MAX_AGENTS);
     this.accounts = this.stable(this.accounts, accounts, "key", MAX_ACCOUNTS);
+    this.syncSharedStatus();
   }
 
   stable(oldRows, freshRows, k, max) {
@@ -1585,6 +1705,277 @@ export default class Routing extends View {
     cx.notify();
   }
 
+  loadAlertPrefs() {
+    try {
+      const v = typeof localStorage !== "undefined" ? localStorage.getItem("routing.alerts") : null;
+      if (v === "false" || v === "0") this.alertsEnabled = false;
+      else if (v === "true" || v === "1") this.alertsEnabled = true;
+    } catch (_) { /* ignore storage errors */ }
+  }
+
+  saveAlertPrefs() {
+    if (this.demo) return;
+    try {
+      if (typeof localStorage !== "undefined") localStorage.setItem("routing.alerts", this.alertsEnabled ? "true" : "false");
+    } catch (_) { /* ignore storage errors */ }
+  }
+
+  toggleAlerts(cx) {
+    this.alertsEnabled = !this.alertsEnabled;
+    this.saveAlertPrefs();
+    cx.notify();
+  }
+
+  async runMagpieCli(args, timeout = 12000) {
+    if (!this.remote && this.isWindows()) {
+      return exec("magpie", args, this.execOpts(timeout));
+    }
+    const cmd = `PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" magpie ${args.map(shellQuote).join(" ")}`;
+    return exec("sh", ["-c", cmd], this.execOpts(timeout));
+  }
+
+  spawnAction(cx, fn) {
+    if (typeof cx?.spawn === "function") cx.spawn(async (cx2) => { await fn(cx2); });
+    else fn(cx);
+  }
+
+  closeMenus(cx) {
+    if (!this.agentMenu && !this.profileMenuOpen) return;
+    this.agentMenu = null;
+    this.profileMenuOpen = false;
+    cx?.notify();
+  }
+
+  async loadProfiles(cx) {
+    if (this.demo) return;
+    try {
+      const r = await this.runMagpieCli(["profiles"], 10000);
+      if (r?.code !== 0 && !r?.stdout) return;
+      const list = parseProfiles(r.stdout || "");
+      if (list.length) {
+        this.profiles = list;
+        if (!this.activeProfile) this.activeProfile = list[0].name;
+        cx?.notify();
+      }
+    } catch (_) { /* magpie CLI optional */ }
+  }
+
+  async applyProfile(name, cx) {
+    if (this.demo || this.profileBusy) return;
+    this.profileBusy = name;
+    cx?.notify();
+    try {
+      const r = await this.runMagpieCli(["use", name], 15000);
+      if (r?.code === 0) {
+        this.activeProfile = name;
+        this.profileMenuOpen = false;
+        notify({ title: "Magpie Profile", level: "success", timeout: 4000, body: `Switched to ${name}` });
+      } else {
+        const msg = stripAnsi(r?.stderr || r?.stdout || "failed").trim().split(/\r?\n/).pop();
+        notify({ title: "Magpie Profile Error", level: "error", timeout: 6000, body: msg || `magpie use ${name} failed` });
+      }
+    } catch (e) {
+      notify({ title: "Magpie Profile Error", level: "error", timeout: 6000, body: String(e?.message || e) });
+    } finally {
+      this.profileBusy = "";
+      cx?.notify();
+    }
+  }
+
+  async openMagpiePanel(cx) {
+    if (this.demo || this.remote) return;
+    try {
+      await this.runMagpieCli(["panel"], 8000);
+    } catch (_) { /* ignore */ }
+    cx?.notify();
+  }
+
+  async openAgentMenu(agentId, rowIndex, cx) {
+    if (this.demo) return;
+    this.profileMenuOpen = false;
+    this.hoveredQuotaProv = null;
+    this.agentMenu = {
+      agent: agentId, rowIndex, loading: true, busy: "", error: "",
+      currentModel: "", currentEffort: "", models: [],
+    };
+    cx?.notify();
+    try {
+      const [statusRes, modelsRes] = await Promise.all([
+        this.runMagpieCli([agentId], 10000),
+        this.runMagpieCli(["models", agentId], 12000),
+      ]);
+      if (!this.agentMenu || this.agentMenu.agent !== agentId) return;
+      const st = parseAgentStatus(statusRes?.stdout || "");
+      const models = parseAgentModels(modelsRes?.stdout || "");
+      this.agentMenu = {
+        ...this.agentMenu,
+        loading: false,
+        currentModel: st.model,
+        currentEffort: st.effort,
+        models,
+        error: (!st.model && !models.length) ? "No CLI config or models found for this agent." : "",
+      };
+    } catch (e) {
+      if (!this.agentMenu || this.agentMenu.agent !== agentId) return;
+      this.agentMenu = { ...this.agentMenu, loading: false, error: String(e?.message || e).slice(0, 140) };
+    }
+    cx?.notify();
+  }
+
+  async setAgentModel(agentId, modelId, cx) {
+    if (!this.agentMenu || this.agentMenu.agent !== agentId || this.agentMenu.busy) return;
+    this.agentMenu = { ...this.agentMenu, busy: modelId, error: "" };
+    cx?.notify();
+    try {
+      const r = await this.runMagpieCli([agentId, modelId], 12000);
+      if (r?.code === 0) {
+        const stRes = await this.runMagpieCli([agentId], 8000).catch(() => null);
+        const st = parseAgentStatus(stRes?.stdout || "");
+        if (this.agentMenu?.agent === agentId) {
+          this.agentMenu = {
+            ...this.agentMenu,
+            busy: "",
+            currentModel: st.model || modelId.replace(/^magpie\//, ""),
+            currentEffort: st.effort || this.agentMenu.currentEffort,
+          };
+        }
+        notify({ title: agentLabel(agentId), level: "success", timeout: 3500, body: `Model → ${modelId}` });
+      } else {
+        const msg = stripAnsi(r?.stderr || r?.stdout || "failed").trim().split(/\r?\n/).pop();
+        if (this.agentMenu?.agent === agentId) this.agentMenu = { ...this.agentMenu, busy: "", error: msg || "Failed to switch model" };
+      }
+    } catch (e) {
+      if (this.agentMenu?.agent === agentId) this.agentMenu = { ...this.agentMenu, busy: "", error: String(e?.message || e) };
+    }
+    cx?.notify();
+  }
+
+  async setAgentEffort(agentId, effort, cx) {
+    if (!this.agentMenu || this.agentMenu.agent !== agentId || this.agentMenu.busy) return;
+    this.agentMenu = { ...this.agentMenu, busy: `effort:${effort}`, error: "" };
+    cx?.notify();
+    try {
+      const r = await this.runMagpieCli([agentId, "effort", effort], 12000);
+      if (r?.code === 0) {
+        if (this.agentMenu?.agent === agentId) {
+          this.agentMenu = { ...this.agentMenu, busy: "", currentEffort: effort };
+        }
+        notify({ title: agentLabel(agentId), level: "success", timeout: 3000, body: `Effort → ${effort}` });
+      } else {
+        const msg = stripAnsi(r?.stderr || r?.stdout || "failed").trim().split(/\r?\n/).pop();
+        if (this.agentMenu?.agent === agentId) this.agentMenu = { ...this.agentMenu, busy: "", error: msg || "Failed to set effort" };
+      }
+    } catch (e) {
+      if (this.agentMenu?.agent === agentId) this.agentMenu = { ...this.agentMenu, busy: "", error: String(e?.message || e) };
+    }
+    cx?.notify();
+  }
+
+  tightestQuotaLeft(group) {
+    const accts = group?.accounts || [];
+    let best = null;
+    for (const a of accts) {
+      let acctTight = null;
+      for (const h of a.allow || []) {
+        if (typeof h.left === "number") acctTight = acctTight == null ? h.left : Math.min(acctTight, h.left);
+      }
+      if (acctTight != null) best = best == null ? acctTight : Math.max(best, acctTight);
+    }
+    return best;
+  }
+
+  burnRateOf(provId) {
+    const pts = this.quotaHistory.get(provId);
+    if (!pts || pts.length < 2) return null;
+    const first = pts[0], last = pts[pts.length - 1];
+    const dtMs = last.ts - first.ts;
+    const drop = first.left - last.left;
+    if (dtMs < 5 * 60 * 1000 || drop < 1) return null;
+    const pctPerHr = Math.round((drop / (dtMs / 3600000)) * 10) / 10;
+    if (!(pctPerHr > 0)) return null;
+    const estHoursLeft = last.left > 0 ? Math.round((last.left / pctPerHr) * 10) / 10 : 0;
+    return { pctPerHr, estHoursLeft };
+  }
+
+  recordQuotaTelemetry(now = Date.now()) {
+    const cutoff = now - 60 * 60 * 1000;
+    for (const [provId, group] of Object.entries(this.quotas || {})) {
+      const left = this.tightestQuotaLeft(group);
+      if (left == null) continue;
+      let hist = this.quotaHistory.get(provId) || [];
+      hist.push({ ts: now, left });
+      hist = hist.filter((p) => p.ts >= cutoff);
+      if (hist.length > 120) hist = hist.slice(-120);
+      this.quotaHistory.set(provId, hist);
+      this.maybeAlertQuota(provId, provLabel(group.name || provId), left, now);
+    }
+  }
+
+  maybeAlertQuota(provId, label, left, now = Date.now()) {
+    const prev = this.prevQuotaLeft.get(provId);
+    this.prevQuotaLeft.set(provId, left);
+    if (!this.alertsEnabled || this.demo || left > 15) return;
+    if (prev !== undefined && prev <= 15 && left >= prev) return;
+    const key = `q:${provId}`;
+    const lastAt = this.alertCooldowns.get(key) || 0;
+    if (now - lastAt < 15 * 60 * 1000) return;
+    this.alertCooldowns.set(key, now);
+    const rate = this.burnRateOf(provId);
+    const tail = rate ? ` · ~${rate.pctPerHr}%/h` : "";
+    notify({
+      title: left <= 0 ? `Quota Exhausted: ${label}` : `Low Quota: ${label}`,
+      level: left <= 0 ? "error" : "warning",
+      timeout: 7000,
+      body: left <= 0 ? `0% remaining${tail}` : `${Math.round(left)}% remaining${tail}`,
+    });
+  }
+
+  maybeAlertError(r, now = Date.now()) {
+    if (!this.alertsEnabled || this.demo || !r?.done || !(r.status >= 400)) return;
+    if (this.notifiedErrors.has(r.id)) return;
+    this.notifiedErrors.add(r.id);
+    if (this.notifiedErrors.size > 200) {
+      const first = this.notifiedErrors.values().next().value;
+      this.notifiedErrors.delete(first);
+    }
+    const seatKey = r.tries?.length ? this.seatOf(r, r.tries.length - 1) : null;
+    const acctRow = seatKey ? this.acctOf(seatKey) : null;
+    const acct = acctRow?.name || r.provider || "provider";
+    const key = `err:${seatKey || acct}`;
+    const lastAt = this.alertCooldowns.get(key) || 0;
+    if (now - lastAt < 2 * 60 * 1000) return;
+    this.alertCooldowns.set(key, now);
+    const reason = HTTP_REASONS[r.status] ? ` ${HTTP_REASONS[r.status]}` : "";
+    notify({
+      title: "Magpie Request Failed",
+      level: "error",
+      timeout: 6000,
+      body: `${agentLabel(r.agent || "agent")} → ${acct} (${r.status}${reason})`,
+    });
+  }
+
+  syncSharedStatus(now = Date.now()) {
+    if (typeof setShared !== "function" || this.demo) return;
+    let active = 0;
+    let recentErr = false;
+    let latestDone = null;
+    for (const r of this.routes.values()) {
+      if (!r.done) { active += 1; continue; }
+      if (!latestDone || r.id > latestDone.id) latestDone = r;
+      if (r.status >= 400 && r.time && (now - Date.parse(r.time)) < 5 * 60 * 1000) recentErr = true;
+    }
+    if (latestDone?.status >= 400) recentErr = true;
+    let lowQuota = false;
+    for (const group of Object.values(this.quotas || {})) {
+      const left = this.tightestQuotaLeft(group);
+      if (left != null && left <= 15) { lowQuota = true; break; }
+    }
+    const sig = `${active}|${recentErr ? 1 : 0}|${lowQuota ? 1 : 0}`;
+    if (sig === this._lastSharedSig) return;
+    this._lastSharedSig = sig;
+    try { setShared("routing.status", { active, recentErr, lowQuota }); } catch (_) { /* ignore */ }
+  }
+
   loadUpdateState() {
     try {
       const raw = typeof localStorage !== "undefined" ? localStorage.getItem("routing.update") : null;
@@ -1999,6 +2390,7 @@ export default class Routing extends View {
         const provFolded = !this.expandedProviders.has(id);
         const provDragging = this.dragProvider === id && this.overProvider !== id;
         const provDropTarget = this.dragProvider !== null && this.overProvider === id && this.dragProvider !== id;
+        const provRate = this.burnRateOf(id);
 
         if (accounts.length === 1) {
           const q = accounts[0];
@@ -2040,6 +2432,8 @@ export default class Routing extends View {
               .child(div().text_size(10.5).font_semibold().truncate().flex_1().min_w(0).child(provLabel(group.name || id)))
               .when(Boolean(badge), (el) => el.child(div().text_size(8.5).text_color(t.dim).flex_none().child(`· ${badge}`)))
               .when(Boolean(who), (el) => el.child(div().text_size(8.5).text_color(t.muted).flex_none().max_w(90).truncate().child(`· ${who}`)))
+              .when(Boolean(provRate), (el) => el.child(div().px(4).py(0.5).rounded(4).bg(t.surface).border(1).border_color(t.border)
+                .text_size(8).text_color(provRate.estHoursLeft < 4 ? "#d4b06a" : t.accent).flex_none().child(`~${provRate.pctPerHr}%/h`)))
               .when(Boolean(foldedStatus), (el) => el.child(foldedStatus))
               .child(div().text_size(9).text_color(t.dim).flex_none()
                 .child(nextReset ? `Resets ${this.fmtUntil(nextReset)}` : "")))
@@ -2163,6 +2557,8 @@ export default class Routing extends View {
             .child(iconEl(id, 14, t.muted, this.providerIcons))
             .child(div().text_size(10.5).font_semibold().truncate().flex_1().min_w(0).child(provLabel(group.name || id)))
             .when(Boolean(sharedPlan), (el) => el.child(div().text_size(8.5).text_color(t.dim).flex_none().child(`· ${sharedPlan}`)))
+            .when(Boolean(provRate), (el) => el.child(div().px(4).py(0.5).rounded(4).bg(t.surface).border(1).border_color(t.border)
+              .text_size(8).text_color(provRate.estHoursLeft < 4 ? "#d4b06a" : t.accent).flex_none().child(`~${provRate.pctPerHr}%/h`)))
             .when(Boolean(grpEl), (el) => el.child(grpEl))
             .child(div().text_size(8.5).text_color(t.dim).flex_none().child(`${accounts.length} Accounts`)))
           .when(!provFolded, (el) => el.child(v_flex().pl(14).gap(5).children(subBlocks)))
@@ -2209,17 +2605,45 @@ export default class Routing extends View {
         .concat(withMetrics.filter(([, , s]) => !s.allow.length && !s.bestBalance && !s.allErr))
         .concat(withMetrics.filter(([, , s]) => s.allErr))
         .slice(0, 6);
+      const quotaTip = (id, group) => {
+        const rate = this.burnRateOf(id);
+        const lines = [
+          `${provLabel(group.name || id)}${rate ? ` · ~${rate.pctPerHr}%/h (${rate.estHoursLeft}h left)` : ""}`,
+        ];
+        const accts = this.orderedAccounts(id, group.accounts);
+        for (let idx = 0; idx < accts.length; idx++) {
+          const q = accts[idx];
+          const lbl = q.alias || (!this.masked && q.user ? q.user : (accts.length > 1 ? `Account ${q.num || idx + 1}` : ""));
+          const parts = [];
+          for (const h of q.allow || []) {
+            const p = h.pace && h.long ? `${Math.round(h.pace.left)}% / ${Math.round(h.long.left)}%` : `${Math.round(h.left)}%`;
+            const reset = h.resetsAt ? ` (${this.fmtUntil(h.resetsAt)})` : "";
+            parts.push(`${h.label ? `${h.label} ` : ""}${p}${reset}`);
+          }
+          if (!parts.length && q.balance) parts.push(String(q.balance));
+          else if (!parts.length && q.error) parts.push(String(q.error).slice(0, 60));
+          else if (!parts.length) parts.push("Ready");
+          lines.push(`${lbl ? `${lbl}: ` : ""}${parts.join(" · ")}`);
+        }
+        return lines.join("\n");
+      };
       const summaryChips = chipProviders.map(([id, group, s]) => {
         const nameMax = s.count > 1 ? 62 : 76;
         const nameTxt = this.fitText(shortName(id, group.name), 9, nameMax, false);
-        return h_flex().items_center().gap(4).flex_none()
+        return h_flex().id(`quota-chip-${id}`).items_center().gap(4).flex_none()
+          .tooltip(quotaTip(id, group))
+          .on_hover((isOn, cx2) => {
+            if (isOn) this.hoveredQuotaProv = id;
+            else if (this.hoveredQuotaProv === id) this.hoveredQuotaProv = null;
+            cx2.notify();
+          })
           .child(iconEl(id, 11, t.muted, this.providerIcons))
           .child(div().text_size(9).text_color(t.muted).overflow_hidden().whitespace_nowrap().child(nameTxt))
           .when(s.count > 1, (el) => el.child(div().text_size(8).text_color(t.dim).child(`×${s.count}`)))
           .child(statusEl(s.allow, s.bestBalance, s.allErr, 9, true));
       });
       const summaryRow = h_flex().px(10).pb(8).items_center().cursor_pointer()
-        .on_click((_, cx2) => { this.quotaOpen = true; this.saveQuotaPrefs(); cx2.notify(); })
+        .on_click((_, cx2) => { this.quotaOpen = true; this.hoveredQuotaProv = null; this.saveQuotaPrefs(); cx2.notify(); })
         .child(h_flex().id("quota-summary-clip").flex_1().min_w(0).gap(8).items_center().overflow_hidden()
           .when(summaryChips.length > 0, el => el.children(summaryChips))
           .when(!summaryChips.length, el => el.child(div().text_size(9).text_color(t.dim).child("Loading provider quotas…"))));
@@ -2238,6 +2662,7 @@ export default class Routing extends View {
           .on_click((_, cx2) => {
             if (this.dragProvider || this.dragAcct || (Date.now() - (this.lastDragEndAt || 0) < 300)) return;
             this.quotaOpen = !this.quotaOpen;
+            this.hoveredQuotaProv = null;
             this.saveQuotaPrefs();
             cx2.notify();
           })
@@ -2567,10 +2992,15 @@ export default class Routing extends View {
         .bg(selected ? t.selected : on ? rgba(a.color, 0.08) : hovered ? t.raised : t.canvas)
         .border(1).border_color(selected ? t.accent : on ? rgba(a.color, 0.85) : hovered ? t.selected : t.border)
         .when(!on && hasLive && !hovered && !selected, el => el.opacity(0.48))
+        .tooltip("Click to filter · Right-click to switch model / effort")
         .on_hover((isOn, cx2) => {
           if (isOn) this.hoveredAgent = a.id;
           else if (this.hoveredAgent === a.id) this.hoveredAgent = null;
           cx2.notify();
+        })
+        .on_mouse_down("right", (_e, cx2) => {
+          cx2.stop_propagation();
+          this.spawnAction(cx2, (cx3) => this.openAgentMenu(a.id, i, cx3));
         })
         .on_click((_, cx2) => {
           this.selectedAgent = selected ? null : a.id;
@@ -2683,8 +3113,14 @@ export default class Routing extends View {
       return true;
     };
     const routes = [...this.routes.values()].sort((a, b) => b.id - a.id).filter(matchesFilter);
-    const inFlight = routes.filter(r => !r.done);
-    const recent = routes.filter(r => r.done).slice(0, 40);
+    const inFlightAll = routes.filter(r => !r.done);
+    const recentAll = routes.filter(r => r.done).slice(0, 40);
+    const errorRoutes = recentAll.filter(r => r.status && r.status >= 400);
+    const activeFilter = (this.statusFilter === "active" && inFlightAll.length > 0)
+      || (this.statusFilter === "error" && errorRoutes.length > 0)
+      ? this.statusFilter : null;
+    const inFlight = activeFilter === "error" ? [] : inFlightAll;
+    const recent = activeFilter === "active" ? [] : (activeFilter === "error" ? errorRoutes : recentAll);
 
     const rowFor = (r) => {
       const agent = r.agent || "?";
@@ -2706,12 +3142,17 @@ export default class Routing extends View {
       const retry = tries > 1 ? `${tries} try · ` : "";
       const tps = r.done ? this.toksPerS(r) : "";
       const cache = r.done ? this.cacheHit(r) : null;
-      const stat = r.done
-        ? `${retry}${this.fmtTok(r.tokens)} tok · ${this.fmtMs(r.ms)}${tps && tps !== "—" ? ` · ${tps}` : ""}${cache != null ? ` · ${cache}% cached` : ""}`
-        : `${retry}${this.fmtElapsed(now - new Date(r.time).getTime())}`;
       // the state dot and the seat's name share the request's colour:
       // gold active, green answered, red failed — magpie's row read
       const failed = r.done && r.status && r.status >= 400;
+      const errLabel = failed
+        ? `${r.status}${HTTP_REASONS[r.status] ? ` ${HTTP_REASONS[r.status]}` : ""}`
+        : "";
+      const stat = r.done
+        ? (failed
+          ? `${retry}${errLabel}${r.tokens ? ` · ${this.fmtTok(r.tokens)} tok` : ""} · ${this.fmtMs(r.ms)}`
+          : `${retry}${this.fmtTok(r.tokens)} tok · ${this.fmtMs(r.ms)}${tps && tps !== "—" ? ` · ${tps}` : ""}${cache != null ? ` · ${cache}% cached` : ""}`)
+        : `${retry}${this.fmtElapsed(now - new Date(r.time).getTime())}`;
       const whoColor = !r.done ? "#d4b06a" : failed ? "#e26a6a" : "#34d399";
       const dotColor = !r.done ? "#facc15" : failed ? "#e26a6a" : "#34d399";
       const shown = !this.masked && acctRow?.who && acctRow.who !== acctRow.name
@@ -2725,10 +3166,101 @@ export default class Routing extends View {
         r.out ? `out ${this.fmtTok(r.out)}` : null,
         cache != null ? `cache hit ${cache}%` : null,
       ].filter(Boolean).join(" · ");
+
+      const rowInnerW = Math.max(160, (g.W + 14) - 4);
+      const detailBarW = Math.max(110, Math.round(rowInnerW - 42));
+      const buildSegBar = (segs, totalVal, hPx) => {
+        if (!segs.length || totalVal <= 0) return null;
+        let usedW = 0;
+        const bars = segs.map((seg, idx) => {
+          const wPx = idx === segs.length - 1
+            ? Math.max(2, detailBarW - usedW)
+            : Math.max(2, Math.round((seg.val / totalVal) * detailBarW));
+          usedW += wPx;
+          return div().w(wPx).h(hPx).bg(seg.color).flex_none();
+        });
+        return h_flex().w(detailBarW).h(hPx).rounded(hPx / 2).overflow_hidden().bg(t.border).children(bars);
+      };
+
+      let ctxBlock = null;
+      let timingBlock = null;
+      let diagBadges = null;
+      if (expanded) {
+        if (r.prompt?.tokens > 0) {
+          const pTok = r.prompt.tokens;
+          const pWin = r.prompt.window || 0;
+          const pPct = pWin > 0 ? Math.min(100, Math.round((pTok / pWin) * 100)) : null;
+          const pCol = pPct == null ? t.muted : pPct >= 85 ? "#e26a6a" : pPct >= 60 ? "#d4b06a" : "#34d399";
+          const parts = (r.prompt.parts || []).filter((p) => p?.tokens > 0);
+          const partSegs = parts.map((p) => ({
+            val: p.tokens,
+            color: PROMPT_PART_COLORS[p.kind] || "#94a3b8",
+            kind: PROMPT_PART_NAMES[p.kind] || p.kind,
+            pct: Math.max(1, Math.round((p.tokens / pTok) * 100)),
+          }));
+          const topLegend = [...partSegs].sort((a, b) => b.val - a.val).slice(0, 3);
+          const barEl = buildSegBar(partSegs, partSegs.reduce((s, x) => s + x.val, 0), 5);
+          ctxBlock = v_flex().gap(3).pt(1)
+            .child(h_flex().items_center().justify_between().text_size(9).min_w(0)
+              .child(div().text_color(t.muted).child(pWin > 0
+                ? `Context ${this.fmtTok(pTok)} / ${this.fmtTok(pWin)}`
+                : `Prompt ${this.fmtTok(pTok)}`))
+              .child(div().text_color(pCol).font_semibold().child([
+                pPct != null ? `${pPct}%` : null,
+                r.prompt.turns ? `${r.prompt.turns} turns` : null,
+              ].filter(Boolean).join(" · "))))
+            .when(Boolean(barEl), (el) => el.child(barEl))
+            .when(topLegend.length > 0, (el) => el.child(h_flex().gap(8).items_center().flex_wrap()
+              .children(topLegend.map((lg) => h_flex().gap(3).items_center().text_size(8.5).text_color(t.dim)
+                .child(div().size(5).rounded(2.5).bg(lg.color).flex_none())
+                .child(`${lg.kind} ${lg.pct}%`)))));
+        }
+        const phases = computeTimingPhases(r);
+        if (phases.length > 0) {
+          const pSegs = phases.map((p) => ({ val: p.ms, color: p.color, label: p.label, ms: p.ms }));
+          const tBar = buildSegBar(pSegs, pSegs.reduce((s, x) => s + x.val, 0), 4);
+          timingBlock = v_flex().gap(3).pt(1)
+            .when(Boolean(tBar), (el) => el.child(tBar))
+            .child(h_flex().gap(8).items_center().flex_wrap()
+              .children(phases.map((p) => h_flex().gap(3).items_center().text_size(8.5).text_color(t.dim)
+                .child(div().size(5).rounded(2.5).bg(p.color).flex_none())
+                .child(`${p.label} ${this.fmtMs(p.ms)}`))));
+        }
+        const bList = [];
+        if (r.affinity) {
+          const affText = r.affinity.kept
+            ? `Affinity kept${r.affinity.cacheRead > 0 ? ` (${this.fmtTok(r.affinity.cacheRead)})` : ""}`
+            : `Affinity: ${r.affinity.why || "rerouted"}`;
+          bList.push(div().px(5).py(1).rounded(4).text_size(8.5)
+            .bg(t.surface).border(1).border_color(t.border)
+            .text_color(r.affinity.kept ? "#34d399" : "#d4b06a")
+            .child(affText));
+        }
+        if (r.masked?.n > 0) {
+          const kinds = Object.entries(r.masked.kinds || {})
+            .sort((a, b) => b[1] - a[1]).slice(0, 2)
+            .map(([k, v]) => `${v} ${k}`).join(" · ");
+          bList.push(div().px(5).py(1).rounded(4).text_size(8.5)
+            .bg(t.surface).border(1).border_color(t.border)
+            .text_color(t.accent)
+            .child(`${r.masked.n} masked${kinds ? ` (${kinds})` : ""}`));
+        }
+        if (r.effort) {
+          bList.push(div().px(5).py(1).rounded(4).text_size(8.5)
+            .bg(t.surface).border(1).border_color(t.border)
+            .text_color(t.muted)
+            .child(`effort ${r.effort}`));
+        }
+        if (bList.length) diagBadges = h_flex().gap(4).items_center().flex_wrap().pt(1).children(bList);
+      }
+
       const detailBlock = expanded ? v_flex().mt(4).ml(20).px(8).py(6).gap(3).rounded(6).min_w(0).overflow_hidden()
         .bg(t.canvas).border(1).border_color(t.border)
         .child(div().text_size(9.5).text_color(t.muted).min_w(0).truncate().child(modelLabel))
         .when(Boolean(metrics), el => el.child(div().text_size(9.5).text_color(t.dim).min_w(0).truncate().child(metrics)))
+        .when(Boolean(ctxBlock), el => el.child(ctxBlock))
+        .when(Boolean(timingBlock), el => el.child(timingBlock))
+        .when(Boolean(diagBadges), el => el.child(diagBadges))
         .children((r.tries || []).map((tr, idx) => {
           const tSeat = this.acctOf(tr.id);
           const tName = tSeat?.name || provLabel(tr.name || tr.id || "?");
@@ -2741,7 +3273,6 @@ export default class Routing extends View {
             .child(div().text_color(t.foreground).truncate().flex_1().min_w(0).child(tName))
             .child(div().text_color(tFail ? "#e26a6a" : t.dim).flex_none().child(tStat));
         })) : null;
-      const rowInnerW = Math.max(160, (g.W + 14) - 4);
       const timeW = this.estTextW(time, 10, false);
       const topAvail = Math.max(80, rowInnerW - 54 - timeW);
       const agentMax = Math.min(84, Math.max(32, Math.floor(topAvail * 0.34)));
@@ -2812,7 +3343,7 @@ export default class Routing extends View {
             .when(!r.done, el => el.loop("opacity", { from: 1, to: .35, period: 1100 })))
           .child(div().text_size(10).text_color(t.dim).flex_none().whitespace_nowrap().child(time)))
         .when(r.done, el => el.child(h_flex().items_center().gap(6).pl(plW).min_w(0).overflow_hidden()
-          .child(div().text_size(10).text_color(t.dim).min_w(0).overflow_hidden().whitespace_nowrap().child(stat))
+          .child(div().text_size(10).text_color(failed ? "#e26a6a" : t.dim).min_w(0).overflow_hidden().whitespace_nowrap().child(stat))
           .when(Boolean(shownDoneTxt), row => row
             .child(div().flex_1().min_w(4))
             .child(div().text_size(10).text_color(t.dim).flex_none().whitespace_nowrap().child(shownDoneTxt)))))
@@ -2840,76 +3371,261 @@ export default class Routing extends View {
     for (const r of inFlight) list.child(rowFor(r));
     for (const r of recent) list.child(rowFor(r));
     if (!inFlight.length && !recent.length) {
-      list.child(div().px(2).py(12).text_size(11).text_color(t.dim).child(filterLabel ? "No matching requests." : "No request yet."));
+      list.child(div().px(2).py(12).text_size(11).text_color(t.dim).child((filterLabel || activeFilter) ? "No matching requests." : "No request yet."));
     }
 
     const updatePill = this.updatePill(t);
-    return v_flex().size_full().bg(t.surface).text_color(t.foreground)
-      .child(h_flex().px(12).pt(10).pb(6).gap(6).items_center()
-        .child(div().text_size(13).font_semibold().child("Magpie"))
-        .when(Boolean(updatePill), el => el
-          .child(div().text_size(11).text_color(t.dim).flex_none().child("·"))
-          .child(updatePill))
-        .child(div().flex_1())
-        .child(div().text_size(9.5).text_color(t.dim).min_w(0).truncate().child(this.remoteLabel)))
-      .when(this.offline, el => el.child(div().px(12).py(16).text_size(11.5).text_color(t.muted).child(this.offline)))
-      .when(!this.offline, el => el
-        .child(div().id("stage-card").relative().mx(10).mb(8).p(6).rounded(10).bg(t.canvas).border(1).border_color(t.border)
-          .on_hover((isOn, cx2) => { if (this.stageHovered !== isOn) { this.stageHovered = isOn; cx2.notify(); } })
-          .child(div().relative().w_full().h(g.H)
-            .id("stage").on_size_change((size, cx) => {
-              const zoom = settings().zoom || 1;
-              const w = size.width / zoom, h = size.height / zoom;
-              const widthChanged = Math.abs(w - this.size.width) >= 0.5;
-              this.size = { width: w, height: h };
-              if (widthChanged) cx.notify();
-            })
-            .children(children))
-          .when(this.stageHovered, el2 => el2.child(
-            h_flex().id("stage-style-toggle").absolute().right(6).bottom(3)
-              .px(6).py(1).gap(4).rounded(5).items_center().cursor_pointer()
-              .bg(t.surface).border(1).border_color(t.border)
-              .hover(s => s.bg(t.hover).border_color(t.selected))
-              .tooltip(`Stage style: ${STAGE_STYLE_LABELS[this.stageStyle]} (click to switch)`)
-              .on_click((_, cx2) => { cx2.stop_propagation(); this.cycleStageStyle(cx2); })
-              .child(this.stageStyle === "magpie"
-                ? svg("mods/routing/icons/magpie.svg").size(10).flex_none().text_color(t.accent)
-                : this.stageStyle === "stream"
-                  ? svg("mods/routing/route.svg").size(10).flex_none().text_color(t.accent)
-                  : div().size(6).rounded(3).bg(t.muted).flex_none())
-              .child(div().text_size(9).font_medium().text_color(t.muted)
-                .child(STAGE_STYLE_LABELS[this.stageStyle])))))
-        .child(this.quotaPanel(t))
-        .child(h_flex().px(12).pt(2).pb(2).gap(6).items_center()
-          .child(div().text_size(11).font_semibold().flex_none().child("Requests"))
-          .when(Boolean(filterLabel), el => el.child(h_flex().id("clear-filter").px(6).py(1).gap(4).rounded(4)
-            .bg(t.canvas).border(1).border_color(t.border).items_center().cursor_pointer()
-            .hover(s => s.bg(t.hover))
-            .on_click((_, cx2) => { this.selectedAgent = null; this.selectedAcct = null; cx2.notify(); })
-            .child(div().text_size(9.5).text_color(t.accent).max_w(100).truncate().child(filterLabel))
-            .child(div().text_size(9.5).text_color(t.dim).child("×"))))
-          .when(inFlight.length > 0, el => el
-            .child(div().text_size(9.5).text_color("#d4b06a").flex_none().child(`${inFlight.length} active`))
-            .when(recent.length > 0, el2 => el2.child(div().text_size(9.5).text_color(t.dim).flex_none().child("·"))))
-          .when(recent.length > 0, el => el
-            .child(div().text_size(9.5).text_color(t.dim).flex_none().child(`${recent.length} recent`)))
+    const hasProfiles = !this.demo && this.profiles.length > 0;
+    const rawRemote = String(this.remoteLabel || "");
+    const headerHost = (hasProfiles && Boolean(updatePill) && g.W < 340)
+      ? ((/:\d+$/.exec(rawRemote)?.[0]) || rawRemote.replace(/^localhost\s*·\s*/i, ""))
+      : this.remoteLabel;
+    const showQuotaHover = !this.quotaOpen && Boolean(this.hoveredQuotaProv && this.quotas?.[this.hoveredQuotaProv]) && !this.agentMenu && !this.profileMenuOpen;
+    const popoverChildren = (!this.offline && (this.agentMenu || this.profileMenuOpen || showQuotaHover)) ? this.renderPopovers(t, g) : [];
+    return div().relative().size_full().bg(t.surface).text_color(t.foreground)
+      .child(v_flex().size_full()
+        .child(h_flex().px(12).pt(10).pb(6).gap(6).items_center()
+          .child(div().text_size(13).font_semibold().child("Magpie"))
+          .when(Boolean(updatePill), el => el
+            .child(div().text_size(11).text_color(t.dim).flex_none().child("·"))
+            .child(updatePill))
           .child(div().flex_1())
-          .child(h_flex().id("toggle-masked").gap(4).items_center().flex_none()
-            .cursor_pointer()
-            .on_click((_, cx2) => { this.masked = !this.masked; cx2.notify(); })
-            .child(svg(`mods/routing/icons/${this.masked ? "eye-off" : "eye"}.svg`).size(11)
-              .text_color(this.masked ? t.muted : t.accent))
-            .child(div().text_size(9.5)
-              .text_color(this.masked ? t.muted : t.accent)
-              .child(this.masked ? "Masked" : "Shown"))))
-        .child(list)
-        .child(h_flex().px(12).py(6).items_center().justify_between().border_t(1).border_color(t.border)
-          .child(div().text_size(10).text_color(t.dim)
-            .child(`pid ${this.pid || "—"} · ${this.totals.requests} calls · ${this.totals.rerouted} retried`))
-          .child(div().id("refresh-all").px(4).py(1).rounded(4).text_size(11)
-            .text_color(this.traceBusy || this.quotaBusy ? t.accent : t.dim)
-            .cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
-            .on_click((_, cx2) => { this.refreshAll(cx2); })
-            .child("⟳"))));
+          .child(div().id("open-magpie").text_size(9.5).text_color(t.dim).min_w(0).truncate()
+            .when(!this.demo && !this.remote, el => el.cursor_pointer()
+              .hover(s => s.text_color(t.foreground))
+              .tooltip(`${rawRemote} · Click to open Magpie panel`)
+              .on_click((_, cx2) => { this.spawnAction(cx2, (cx3) => this.openMagpiePanel(cx3)); }))
+            .child(headerHost))
+          .when(hasProfiles, el => el
+            .child(h_flex().id("profile-toggle").px(5).py(1).gap(3).rounded(4).items_center().flex_none()
+              .cursor_pointer().bg(this.profileMenuOpen ? t.selected : t.canvas)
+              .border(1).border_color(this.profileMenuOpen ? t.accent : t.border)
+              .hover(s => s.bg(t.hover))
+              .tooltip("Switch Magpie routing profile")
+              .on_click((_, cx2) => {
+                cx2.stop_propagation();
+                this.agentMenu = null;
+                this.hoveredQuotaProv = null;
+                this.profileMenuOpen = !this.profileMenuOpen;
+                cx2.notify();
+              })
+              .child(div().text_size(9).font_medium().text_color(t.muted).child(this.activeProfile || "Profile"))
+              .child(div().text_size(8.5).text_color(t.dim).child("▾")))))
+        .when(this.offline, el => el.child(div().px(12).py(16).text_size(11.5).text_color(t.muted).child(this.offline)))
+        .when(!this.offline, el => el
+          .child(div().id("stage-card").relative().mx(10).mb(8).p(6).rounded(10).bg(t.canvas).border(1).border_color(t.border)
+            .on_hover((isOn, cx2) => { if (this.stageHovered !== isOn) { this.stageHovered = isOn; cx2.notify(); } })
+            .child(div().relative().w_full().h(g.H)
+              .id("stage").on_size_change((size, cx) => {
+                const zoom = settings().zoom || 1;
+                const w = size.width / zoom, h = size.height / zoom;
+                const widthChanged = Math.abs(w - this.size.width) >= 0.5;
+                this.size = { width: w, height: h };
+                if (widthChanged) cx.notify();
+              })
+              .children(children))
+            .when(this.stageHovered, el2 => el2.child(
+              h_flex().id("stage-style-toggle").absolute().right(6).bottom(3)
+                .px(6).py(1).gap(4).rounded(5).items_center().cursor_pointer()
+                .bg(t.surface).border(1).border_color(t.border)
+                .hover(s => s.bg(t.hover).border_color(t.selected))
+                .tooltip(`Stage style: ${STAGE_STYLE_LABELS[this.stageStyle]} (click to switch)`)
+                .on_click((_, cx2) => { cx2.stop_propagation(); this.cycleStageStyle(cx2); })
+                .child(this.stageStyle === "magpie"
+                  ? svg("mods/routing/icons/magpie.svg").size(10).flex_none().text_color(t.accent)
+                  : this.stageStyle === "stream"
+                    ? svg("mods/routing/route.svg").size(10).flex_none().text_color(t.accent)
+                    : div().size(6).rounded(3).bg(t.muted).flex_none())
+                .child(div().text_size(9).font_medium().text_color(t.muted)
+                  .child(STAGE_STYLE_LABELS[this.stageStyle])))))
+          .child(this.quotaPanel(t))
+          .child(h_flex().px(12).pt(2).pb(2).gap(6).items_center()
+            .child(div().text_size(11).font_semibold().flex_none().child("Requests"))
+            .when(Boolean(filterLabel), el => el.child(h_flex().id("clear-filter").px(6).py(1).gap(4).rounded(4)
+              .bg(t.canvas).border(1).border_color(t.border).items_center().cursor_pointer()
+              .hover(s => s.bg(t.hover))
+              .on_click((_, cx2) => { this.selectedAgent = null; this.selectedAcct = null; this.statusFilter = null; cx2.notify(); })
+              .child(div().text_size(9.5).text_color(t.accent).max_w(100).truncate().child(filterLabel))
+              .child(div().text_size(9.5).text_color(t.dim).child("×"))))
+            .when(inFlightAll.length > 0, el => el
+              .child(div().id("filter-active").text_size(9.5).flex_none().cursor_pointer()
+                .when(activeFilter === "active", e2 => e2.px(5).py(1).rounded(4).bg(t.canvas).border(1).border_color("#d4b06a"))
+                .text_color("#d4b06a")
+                .hover(s => s.opacity(0.8))
+                .on_click((_, cx2) => { this.statusFilter = activeFilter === "active" ? null : "active"; cx2.notify(); })
+                .child(`${inFlightAll.length} active`))
+              .when(recentAll.length > 0 || errorRoutes.length > 0, el2 => el2.child(div().text_size(9.5).text_color(t.dim).flex_none().child("·"))))
+            .when(recentAll.length > 0, el => el
+              .child(div().text_size(9.5).text_color(t.dim).flex_none().child(`${recentAll.length} recent`)))
+            .when(errorRoutes.length > 0, el => el
+              .when(recentAll.length > 0, e2 => e2.child(div().text_size(9.5).text_color(t.dim).flex_none().child("·")))
+              .child(div().id("filter-errors").text_size(9.5).flex_none().cursor_pointer()
+                .when(activeFilter === "error", e2 => e2.px(5).py(1).rounded(4).bg(t.canvas).border(1).border_color("#e26a6a"))
+                .text_color("#e26a6a")
+                .hover(s => s.opacity(0.8))
+                .on_click((_, cx2) => { this.statusFilter = activeFilter === "error" ? null : "error"; cx2.notify(); })
+                .child(`${errorRoutes.length} err`)))
+            .child(div().flex_1())
+            .child(h_flex().id("toggle-masked").gap(4).items_center().flex_none()
+              .cursor_pointer()
+              .on_click((_, cx2) => { this.masked = !this.masked; cx2.notify(); })
+              .child(svg(`mods/routing/icons/${this.masked ? "eye-off" : "eye"}.svg`).size(11)
+                .text_color(this.masked ? t.muted : t.accent))
+              .child(div().text_size(9.5)
+                .text_color(this.masked ? t.muted : t.accent)
+                .child(this.masked ? "Masked" : "Shown"))))
+          .child(list)
+          .child(h_flex().px(12).py(6).gap(6).items_center().border_t(1).border_color(t.border)
+            .child(div().text_size(10).text_color(t.dim).truncate().flex_1().min_w(0)
+              .child(`pid ${this.pid || "—"} · ${this.totals.requests} calls · ${this.totals.rerouted} retried`))
+            .child(div().id("toggle-alerts").px(5).py(1).rounded(4).text_size(9.5).flex_none()
+              .cursor_pointer()
+              .bg(this.alertsEnabled ? t.canvas : t.surface)
+              .border(1).border_color(this.alertsEnabled ? t.border : t.surface)
+              .text_color(this.alertsEnabled ? t.accent : t.dim)
+              .hover(s => s.bg(t.hover).text_color(t.foreground))
+              .tooltip(this.alertsEnabled ? "Quota & error notifications ON (click to mute)" : "Notifications muted (click to enable)")
+              .on_click((_, cx2) => { cx2.stop_propagation(); this.toggleAlerts(cx2); })
+              .child(this.alertsEnabled ? "Alerts" : "Muted"))
+            .child(div().id("refresh-all").px(4).py(1).rounded(4).text_size(11).flex_none()
+              .text_color(this.traceBusy || this.quotaBusy ? t.accent : t.dim)
+              .cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground))
+              .on_click((_, cx2) => { this.refreshAll(cx2); })
+              .child("⟳")))))
+      .children(popoverChildren);
+  }
+
+  renderPopovers(t, g) {
+    const out = [];
+    if (this.agentMenu || this.profileMenuOpen) {
+      out.push(div().id("popover-backdrop").absolute().inset_0()
+        .on_mouse_down("left", (_e, cx2) => { cx2.stop_propagation(); this.closeMenus(cx2); }));
+    }
+    if (this.agentMenu) {
+      const m = this.agentMenu;
+      const activeModel = (m.models || []).find((x) =>
+        m.currentModel && (x.id === m.currentModel || x.id.endsWith(`/${m.currentModel}`)));
+      const efforts = activeModel?.efforts?.length
+        ? activeModel.efforts
+        : (m.currentEffort ? ["low", "medium", "high", "xhigh", "max"] : []);
+      const popTop = Math.min(240, 88 + (m.rowIndex || 0) * 28);
+      out.push(v_flex().id("agent-menu-popover").absolute().left(10).right(10).max_w(312).top(popTop).overflow_hidden()
+        .p(8).gap(6).rounded(8).bg(t.surface).border(1).border_color(t.accent)
+        .on_mouse_down("left", (_e, cx2) => cx2.stop_propagation())
+        .child(h_flex().items_center().gap(6)
+          .child(iconEl(m.agent, 13, hueOf(m.agent), this.providerIcons))
+          .child(div().text_size(11).font_semibold().flex_1().truncate()
+            .child(`${agentLabel(m.agent)} Quick Switch`))
+          .when(Boolean(m.busy), el => el.child(div().text_size(9).text_color(t.accent).child("Applying…")))
+          .child(div().id("agent-menu-close").px(4).text_size(11).text_color(t.dim).cursor_pointer()
+            .hover(s => s.text_color(t.foreground))
+            .on_click((_, cx2) => { cx2.stop_propagation(); this.closeMenus(cx2); })
+            .child("×")))
+        .when(m.loading, el => el.child(div().text_size(9.5).text_color(t.dim).py(4).child("Loading agent config…")))
+        .when(Boolean(m.error), el => el.child(div().text_size(9.5).text_color("#e26a6a").child(m.error)))
+        .when(!m.loading && efforts.length > 0, el => el
+          .child(v_flex().gap(3)
+            .child(div().text_size(9).text_color(t.dim).child("Effort"))
+            .child(h_flex().gap(4).items_center().flex_wrap()
+              .children(efforts.map((eff) => {
+                const cur = m.currentEffort === eff;
+                return div().id(`effort-${eff}`).px(6).py(2).rounded(4).text_size(9.5).cursor_pointer()
+                  .bg(cur ? t.selected : t.canvas)
+                  .border(1).border_color(cur ? t.accent : t.border)
+                  .text_color(cur ? t.foreground : t.muted)
+                  .when(cur, e => e.font_semibold())
+                  .hover(s => s.bg(t.hover))
+                  .on_click((_, cx2) => { cx2.stop_propagation(); this.spawnAction(cx2, (cx3) => this.setAgentEffort(m.agent, eff, cx3)); })
+                  .child(eff);
+              })))))
+        .when(!m.loading && m.models?.length > 0, el => el
+          .child(v_flex().gap(3)
+            .child(div().text_size(9).text_color(t.dim).child("Model"))
+            .child(v_flex().id("agent-models-list").max_h(190).overflow_y_scroll().gap(2)
+              .children(m.models.map((mod) => {
+                const isCur = Boolean(m.currentModel && (mod.id === m.currentModel || mod.id.endsWith(`/${m.currentModel}`)));
+                return h_flex().id(`pick-model-${mod.id}`).px(6).py(4).gap(6).rounded(5).items_center().cursor_pointer()
+                  .bg(isCur ? t.selected : t.canvas)
+                  .border(1).border_color(isCur ? t.accent : t.border)
+                  .hover(s => s.bg(t.hover))
+                  .on_click((_, cx2) => { cx2.stop_propagation(); this.spawnAction(cx2, (cx3) => this.setAgentModel(m.agent, mod.id, cx3)); })
+                  .child(div().size(5).rounded(2.5).bg(isCur ? t.accent : t.dim).flex_none())
+                  .child(div().text_size(10).when(isCur, e => e.font_semibold()).text_color(isCur ? t.foreground : t.muted).truncate().flex_1().min_w(0)
+                    .child(mod.label || shortModelName(mod.id)))
+                  .child(div().text_size(8.5).text_color(t.dim).max_w(118).truncate().flex_none().child(mod.id));
+              }))))));
+    }
+    if (this.profileMenuOpen) {
+      const popW = Math.min(264, Math.max(200, g.W));
+      out.push(v_flex().id("profile-menu-popover").absolute().right(10).top(34).w(popW).overflow_hidden()
+        .p(8).gap(4).rounded(8).bg(t.surface).border(1).border_color(t.accent)
+        .on_mouse_down("left", (_e, cx2) => cx2.stop_propagation())
+        .child(h_flex().items_center().justify_between()
+          .child(div().text_size(10.5).font_semibold().child("Switch Profile"))
+          .when(Boolean(this.profileBusy), el => el.child(div().text_size(9).text_color(t.accent).child(`Switching ${this.profileBusy}…`))))
+        .children(this.profiles.map((p) => {
+          const isCur = p.name === this.activeProfile;
+          return v_flex().id(`pick-profile-${p.name}`).px(6).py(4).gap(2).rounded(5).cursor_pointer()
+            .bg(isCur ? t.selected : t.canvas)
+            .border(1).border_color(isCur ? t.accent : t.border)
+            .hover(s => s.bg(t.hover))
+            .on_click((_, cx2) => { cx2.stop_propagation(); this.spawnAction(cx2, (cx3) => this.applyProfile(p.name, cx3)); })
+            .child(h_flex().items_center().justify_between()
+              .child(div().text_size(10).font_semibold().text_color(isCur ? t.foreground : t.muted).child(p.name))
+              .when(isCur, el => el.child(div().text_size(9).text_color(t.accent).child("active"))))
+            .child(div().text_size(8.5).text_color(t.dim).truncate().child(p.summary));
+        })));
+    }
+    if (!this.quotaOpen && this.hoveredQuotaProv && this.quotas?.[this.hoveredQuotaProv] && !this.agentMenu && !this.profileMenuOpen) {
+      const provId = this.hoveredQuotaProv;
+      const group = this.quotas[provId];
+      const accts = this.orderedAccounts(provId, group.accounts || []);
+      const rate = this.burnRateOf(provId);
+      const acctCards = accts.slice(0, 4).map((q, idx) => {
+        const lbl = q.alias || (!this.masked && q.user ? q.user : (accts.length > 1 ? `Account ${q.num || idx + 1}` : "Account"));
+        const planTxt = q.plan ? String(q.plan).replace(/\b([a-z])([a-z]*)\b/g, (_, a, b) => a.toUpperCase() + b) : "";
+        const showPlan = planTxt && planTxt.toLowerCase() !== lbl.toLowerCase();
+        const dotCol = q.left != null
+          ? (q.left < 10 ? "#e26a6a" : q.left < 30 ? "#d4b06a" : "#34d399")
+          : (q.error && !q.balance ? "#e26a6a" : "#34d399");
+        const wins = (q.windows || []).filter((w) => !w.text).slice(0, 4);
+        const winRows = wins.map((w) => {
+          const left = this.winLeft(w);
+          const frac = w.unlimited ? 1 : Math.max(0, Math.min(1, left / 100));
+          const exhausted = !w.unlimited && Math.round(left) <= 0;
+          const col = w.unlimited ? "#34d399" : left < 10 ? "#e26a6a" : left < 30 ? "#d4b06a" : "#34d399";
+          const valTxt = w.unlimited ? "Unlimited" : exhausted ? "Exhausted" : `${Math.round(left)}%`;
+          const resetTxt = w.resetsAt ? this.fmtUntil(w.resetsAt) : "";
+          return h_flex().items_center().gap(5)
+            .child(div().w(68).text_size(8.5).text_color(t.muted).flex_none().truncate().child(w.name || "Window"))
+            .child(div().w(64).h(4).rounded(2).bg(t.border).flex_none()
+              .when(frac > 0, (el) => el.child(div().h_full().rounded(2).w(Math.max(2, Math.round(64 * frac))).bg(col))))
+            .child(div().text_size(8.5).font_semibold().text_color(col).flex_none().child(valTxt))
+            .child(div().flex_1().min_w(2))
+            .when(Boolean(resetTxt), (el) => el.child(div().text_size(8).text_color(t.dim).flex_none().child(resetTxt)));
+        });
+        return v_flex().p(6).gap(3).rounded(6).bg(t.canvas).border(1).border_color(t.border)
+          .child(h_flex().items_center().gap(5)
+            .child(div().size(5).rounded(2.5).bg(dotCol).flex_none())
+            .child(div().text_size(9.5).font_semibold().text_color(t.foreground).truncate().child(lbl))
+            .when(Boolean(showPlan), (el) => el.child(div().text_size(8.5).text_color(t.dim).flex_none().child(`· ${planTxt}`)))
+            .child(div().flex_1().min_w(4))
+            .when(Boolean(q.balance), (el) => el.child(div().text_size(8.5).text_color("#34d399").flex_none().child(String(q.balance)))))
+          .children(winRows)
+          .when(!wins.length && Boolean(q.error) && !q.balance, (el) => el.child(div().text_size(8.5).text_color("#e26a6a").truncate().child(String(q.error))))
+          .when(!wins.length && !q.error && !q.balance, (el) => el.child(div().text_size(8.5).text_color("#34d399").child("Ready")));
+      });
+      out.push(v_flex().id("quota-hover-card").absolute().left(10).right(10).max_w(312).top(g.H + 106).overflow_hidden()
+        .p(8).gap(6).rounded(8).bg(t.surface).border(1).border_color(t.border)
+        .child(h_flex().items_center().gap(6)
+          .child(iconEl(provId, 13, t.muted, this.providerIcons))
+          .child(div().text_size(11).font_semibold().truncate().flex_1().min_w(0).child(provLabel(group.name || provId)))
+          .when(accts.length > 1, (el) => el.child(div().text_size(8.5).text_color(t.dim).flex_none().child(`×${accts.length}`)))
+          .when(Boolean(rate), (el) => el.child(div().px(5).py(1).rounded(4).bg(t.canvas).border(1).border_color(t.border)
+            .text_size(8.5).text_color(rate.estHoursLeft < 4 ? "#d4b06a" : t.accent).flex_none()
+            .child(`~${rate.pctPerHr}%/h · ~${rate.estHoursLeft}h`))))
+        .children(acctCards));
+    }
+    return out;
   }
 }
