@@ -9,6 +9,19 @@ together at one version.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-28
+
+### Added
+
+- Expanded request diagnostic card in `mods/routing/main.js` (PR #3, by @KOP-XIAO): context window & prompt composition bar (`sys`, `tools`, `skills`, `mem`, `results`, `chat`), timing waterfall (`Mask`, `Net`, `Think`, `Stream`), affinity/masking/effort badges, semantic HTTP error rows, and clickable `active`/`err` status filters.
+- In-panel quick-switch controls (PR #3, by @KOP-XIAO): right-click stage Agent pills to inspect/switch model and reasoning effort via `magpie` CLI, gateway header click to open `magpie panel`, and inline Profile switcher (`magpie profiles` / `magpie use`).
+- Structured quota hover card, 60-minute burn-rate estimation, and proactive cooldown-guarded desktop notifications for low/exhausted quota and failed requests with a persistent `Alerts`/`Muted` footer toggle (PR #3, by @KOP-XIAO).
+- Top-bar live status dot `#routing-tab-dot` in `mods/tabs-routing/main.js` driven by shared `routing.status` (PR #3, by @KOP-XIAO).
+
+### Fixed
+
+- Follow-up hardening for PR #3: strict `initTarget` config error handling (strip UTF-8 BOM, disable CLI controls on unreadable/empty/non-object `config.json`), bidirectional mutex between profile switches and per-agent writes (with UI disabled states and menu invalidation on profile switch), expanded `Masked` privacy redaction (profile/agent menu errors, `@`/user-echoing aliases, provider/account labels in error and quota notifications), cross-restart trace generation gating for both `poll` and `refreshAll`, 60-row-independent `recentErr` tracking with local-clock capping, full 3-table telemetry cleanup when providers disappear, and aligned `Exhausted` display for `{ left: 0 }` in expanded account bars.
+
 ## [0.6.1] - 2026-11-27
 
 ### Added
