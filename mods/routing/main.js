@@ -181,6 +181,46 @@ const agentLabel = (id) => {
   return raw.charAt(0).toUpperCase() + raw.slice(1);
 };
 
+// Exact canonical agent IDs accepted by `magpie <agent>` / `magpie models <agent>`.
+const CLI_AGENT_ALIASES = Object.assign(Object.create(null), {
+  "claude-code": "claude", claudecode: "claude", cc: "claude",
+  "gemini-cli": "gemini", "agy-cli": "agy", "pi-desktop": "pi",
+  githubcopilot: "copilot", oc: "opencode",
+});
+
+const CLI_AGENTS = new Set([
+  "agy", "aionui", "air", "air-ide", "alma", "ante", "antigravity", "aside",
+  "astrbot", "atomcode", "avibe", "cherrystudio", "cindy", "claude",
+  "claude-desktop", "claude-science", "cline", "codebuddy", "codex",
+  "commandcode", "copilot", "copilot-jetbrains", "craft-agents", "crush",
+  "cursor", "cursor-local", "deveco", "devin", "dim", "droid", "ds-bot",
+  "dsh", "empryo", "fx", "gemini", "goose", "grok", "grok-app", "hanako",
+  "hermes", "jcode", "kigi", "kimi", "kirocrew", "kun", "liveagent", "lody",
+  "mimocode", "minimax-code", "miniq", "morph", "mothx", "mu", "muse",
+  "nanobot", "newmax", "nowledge-mem", "obsidian", "omo", "omp",
+  "open-code-review", "openbot", "openchamber", "openclaw", "opencode",
+  "openmausbot", "openpencil", "paimon", "paseo", "pencil", "penguin", "pi",
+  "prime-agent", "qoder", "qoder-cn", "qwen", "qwenpaw", "raycast", "reasonix",
+  "shelley", "snow", "stepcode", "t3code", "tuanjie-cowork", "vibe", "vscode",
+  "vscode-insiders", "vscodium", "workbuddy", "workbuddy-ai", "zcode", "zed",
+  "zoo-code",
+]);
+
+const resolveCliAgent = (id) => {
+  const raw = String(id || "").trim().toLowerCase();
+  if (!raw) return "";
+  const canonical = Object.hasOwn(CLI_AGENT_ALIASES, raw) ? CLI_AGENT_ALIASES[raw] : raw;
+  return CLI_AGENTS.has(canonical) ? canonical : "";
+};
+
+const shortQuotaError = (err, masked) => {
+  const raw = String(err || "").trim();
+  if (!raw) return "";
+  if (!masked) return raw;
+  const code = /\b([45]\d{2})\b/.exec(raw)?.[1];
+  return code ? `Error (${code})` : "Error (masked)";
+};
+
 const shortModelName = (model, provider, acct) => {
   const m = String(model || "").trim();
   if (!m) return "";
@@ -286,8 +326,7 @@ const computeTimingPhases = (r) => {
   if (!raw.length) return [];
   const sum = raw.reduce((s, p) => s + p.ms, 0);
   if (sum <= 0) return [];
-  const scale = sum > total ? total / sum : 1;
-  return raw.map((p) => ({ ...p, ms: Math.max(1, Math.round(p.ms * scale)) }));
+  return raw;
 };
 
 const hueOf = (id) => {
@@ -359,12 +398,23 @@ export default class Routing extends View {
     this.profileMenuOpen = false;
     this.hoveredQuotaProv = null;
     this.profiles = [];
+    this.profilesLoaded = false;
+    this.profilesInFlight = null;
     this.profileBusy = "";
     this.activeProfile = "";
+    this.agentMenuGen = 0;
+    this.agentWrites = new Map();
+    this.agentWriteSeq = 0;
+    this.agentWriteDoneSeq = new Map();
+    this.traceGen = 0;
+    this.traceInFlight = null;
+    this.quotaFetchSeq = 0;
+    this.quotaInFlight = null;
     this.quotaHistory = new Map();
     this.alertsEnabled = true;
     this.alertCooldowns = new Map();
     this.prevQuotaLeft = new Map();
+    this.prevQuotaTier = new Map();
     this.notifiedErrors = new Set();
     this._lastSharedSig = "";
     this.loadAlertPrefs();
@@ -382,7 +432,10 @@ export default class Routing extends View {
     });
     // once a minute, against the wall clock rather than a long sleep: a laptop
     // that slept through the night is overdue the moment it wakes
-    cx.timer.every(60000, (cx) => { this.maybeCheckUpdate(cx, "routine"); });
+    cx.timer.every(60000, (cx) => {
+      this.maybeCheckUpdate(cx, "routine");
+      if (this.syncSharedStatus()) cx.notify();
+    });
     cx.timer.every(FRAME, (cx) => {
       if (this.demo) return;
       const now = Date.now();
@@ -413,6 +466,21 @@ export default class Routing extends View {
 
   execOpts(timeout = 30000) {
     return this.remote ? { on: this.remote, timeout } : { timeout };
+  }
+
+  cliControlState() {
+    if (this.demo) return { targetOk: false, writable: false, reason: "Disabled in demo mode" };
+    if (!this.configReady) return { targetOk: false, writable: false, reason: "Loading configuration…" };
+    if (this.remote) return { targetOk: false, writable: false, reason: "CLI controls unavailable for remote gateway" };
+    const norm = String(this.baseUrl || DEFAULT_BASE_URL).replace(/\/$/, "").toLowerCase();
+    const def = DEFAULT_BASE_URL.replace(/\/$/, "").toLowerCase();
+    const localhostAlias = def.replace("127.0.0.1", "localhost");
+    const ipv6Alias = def.replace("127.0.0.1", "[::1]");
+    if (norm !== def && norm !== localhostAlias && norm !== ipv6Alias) {
+      return { targetOk: false, writable: false, reason: `CLI controls target local ${DEFAULT_BASE_URL} only` };
+    }
+    if (this.offline) return { targetOk: true, writable: false, reason: "Gateway offline — CLI controls disabled" };
+    return { targetOk: true, writable: true, reason: "" };
   }
 
   async initTarget(cx) {
@@ -561,51 +629,71 @@ export default class Routing extends View {
     } catch (_) { /* optional discovery */ }
   }
 
+  applyTraceSnapshot(d, cx, { sentAfter = this.seq, sentPid = this.pid, fromPoll = false } = {}) {
+    if (!d || d.object !== "trace") throw new Error(d?.error?.message || "not a trace");
+    const pidChanged = d.pid != null && sentPid != null && d.pid !== sentPid;
+    if (!pidChanged && sentAfter !== this.seq && d.seq <= this.seq) return false;
+    if (d.seq < this.seq || pidChanged) {
+      this.routes.clear();
+      this.flights.clear();
+      this.notifiedErrors.clear();
+      this.traceGen += 1;
+    }
+    this.seq = d.seq;
+    this.totals = d.totals || this.totals;
+    this.pid = d.pid ?? this.pid;
+    const first = !this.loaded;
+    const toStart = [];
+    for (const r of Array.isArray(d.routes) ? d.routes : []) {
+      for (const o of r.order || []) {
+        if (o.id && o.icon && !String(o.icon).startsWith("file:")) {
+          this.providerIcons.set(String(o.id).toLowerCase(), String(o.icon));
+        }
+        if (o.provider && o.icon && !String(o.icon).startsWith("file:")) {
+          this.providerIcons.set(String(o.provider).toLowerCase(), String(o.icon));
+        }
+      }
+      const prev = this.routes.get(r.id);
+      const isNew = !prev;
+      this.routes.set(r.id, r);
+      if (isNew && (!first || !r.done)) toStart.push(r);
+      if (r.done && r.status >= 400) {
+        if (first) this.notifiedErrors.add(r.id);
+        else if (!prev?.done) this.maybeAlertError(r);
+      }
+    }
+    this.trimRoutes(d.ids);
+    this.loaded = true;
+    this.failCount = 0;
+    const reconnected = Boolean(this.offline);
+    if (reconnected && fromPoll) this.maybeCheckUpdate(cx, "online");
+    this.offline = "";
+    this.recompute();
+    for (const r of toStart) if (this.routes.has(r.id)) this.start(r);
+    if ((reconnected || !this.profilesLoaded) && this.cliControlState().targetOk) {
+      this.loadProfiles(cx).catch(() => {});
+    }
+    cx?.notify();
+    return true;
+  }
+
   async poll(cx) {
     for (;;) {
       try {
-        const url = `${this.baseUrl}/v1/magpie/trace?after=${this.seq}${this.loaded ? "&wait=1" : ""}`;
+        const sentAfter = this.seq;
+        const sentPid = this.pid;
+        const url = `${this.baseUrl}/v1/magpie/trace?after=${sentAfter}${this.loaded ? "&wait=1" : ""}`;
         const r = await exec("curl", ["-sS", "--max-time", "35", url], this.execOpts(40000));
         const d = JSON.parse(r.stdout);
-        if (d.object !== "trace") throw new Error(d.error?.message || "not a trace");
-        if (d.seq < this.seq) this.routes.clear(); // the gateway started over
-        this.seq = d.seq;
-        this.totals = d.totals || this.totals;
-        this.pid = d.pid ?? this.pid;
-        const first = !this.loaded;
-        const toStart = [];
-        for (const r of d.routes) {
-          for (const o of r.order || []) {
-            if (o.id && o.icon && !String(o.icon).startsWith("file:")) {
-              this.providerIcons.set(String(o.id).toLowerCase(), String(o.icon));
-            }
-            if (o.provider && o.icon && !String(o.icon).startsWith("file:")) {
-              this.providerIcons.set(String(o.provider).toLowerCase(), String(o.icon));
-            }
-          }
-          const prev = this.routes.get(r.id);
-          const isNew = !prev;
-          this.routes.set(r.id, r);
-          if (isNew && (!first || !r.done)) toStart.push(r);
-          if (r.done && r.status >= 400) {
-            if (first) this.notifiedErrors.add(r.id);
-            else if (!prev?.done) this.maybeAlertError(r);
-          }
-        }
-        this.trimRoutes(d.ids);
-        this.loaded = true;
-        this.failCount = 0;
-        if (this.offline) this.maybeCheckUpdate(cx, "online");
-        this.offline = "";
-        this.recompute();
-        this.syncSharedStatus();
-        for (const r of toStart) if (this.routes.has(r.id)) this.start(r);
-        cx.notify();
+        this.applyTraceSnapshot(d, cx, { sentAfter, sentPid, fromPoll: true });
       } catch (e) {
         this.failCount = (this.failCount || 0) + 1;
         if (!this.routes.size || this.failCount >= 3) {
           this.offline = `Remote trace error: ${String(e).slice(0, 240)}`;
           this.loaded = false;
+          this.profilesLoaded = false;
+          this.closeMenus(cx);
+          this.syncSharedStatus();
           cx.notify();
         }
         await cx.sleep(4000);
@@ -1056,53 +1144,63 @@ export default class Routing extends View {
   // (provider.QuotaReport), so this is a live refresh not a cache copy
   async fetchQuotas(cx) {
     if (this.demo) return;
-    this.quotaBusy = true; cx.notify();
+    if (this.quotaInFlight) return this.quotaInFlight;
+    const mySeq = ++this.quotaFetchSeq;
+    this.quotaBusy = true;
+    cx?.notify();
     const t0 = Date.now();
-    try {
-      const r = await exec("curl", ["-sS", "--max-time", "20", `${this.baseUrl}/v1/magpie/quotas`],
-        this.execOpts(25000));
-      const d = JSON.parse(r.stdout);
-      const qNow = Date.now();
-      this.quotas = this.groupQuotaEntries(d.data || [], qNow);
-      this.quotasAt = qNow;
-      this.recordQuotaTelemetry(qNow);
-      this.syncSharedStatus();
-      cx.notify();
-    } finally {
-      const held = Date.now() - t0;
-      if (held < 800) await cx.sleep(800 - held);
-      this.quotaBusy = false; cx.notify();
-    }
+    this.quotaInFlight = (async () => {
+      try {
+        const r = await exec("curl", ["-sS", "--max-time", "20", `${this.baseUrl}/v1/magpie/quotas`],
+          this.execOpts(25000));
+        const d = JSON.parse(r?.stdout || "{}");
+        if (mySeq !== this.quotaFetchSeq) return;
+        if (!Array.isArray(d?.data)) {
+          throw new Error(d?.error?.message || "invalid quota payload");
+        }
+        const qNow = Date.now();
+        this.quotas = this.groupQuotaEntries(d.data, qNow);
+        this.quotasAt = qNow;
+        this.recordQuotaTelemetry(qNow);
+        this.syncSharedStatus(qNow);
+        cx?.notify();
+      } finally {
+        const held = Date.now() - t0;
+        if (held < 800 && cx?.sleep) await cx.sleep(800 - held);
+        if (mySeq === this.quotaFetchSeq) {
+          this.quotaBusy = false;
+          this.quotaInFlight = null;
+          cx?.notify();
+        }
+      }
+    })();
+    return this.quotaInFlight;
   }
 
   async refreshAll(cx) {
     if (this.demo) return;
+    if (this.traceInFlight) return this.traceInFlight;
     this.traceBusy = true;
-    cx.notify();
-    try {
-      const url = `${this.baseUrl}/v1/magpie/trace?after=${this.seq}`;
-      const r = await exec("curl", ["-sS", "--max-time", "15", url], this.execOpts(20000));
-      const d = JSON.parse(r.stdout);
-      if (d.object === "trace") {
-        if (d.seq < this.seq) this.routes.clear();
-        this.seq = d.seq;
-        this.totals = d.totals || this.totals;
-        this.pid = d.pid ?? this.pid;
-        const toStart = [];
-        for (const rt of d.routes) {
-          const isNew = !this.routes.has(rt.id);
-          this.routes.set(rt.id, rt);
-          if (isNew && !rt.done) toStart.push(rt);
+    cx?.notify();
+    this.traceInFlight = (async () => {
+      try {
+        const sentAfter = this.seq;
+        const sentPid = this.pid;
+        const url = `${this.baseUrl}/v1/magpie/trace?after=${sentAfter}`;
+        const r = await exec("curl", ["-sS", "--max-time", "15", url], this.execOpts(20000));
+        const d = JSON.parse(r?.stdout || "{}");
+        if (d?.object === "trace") {
+          this.applyTraceSnapshot(d, cx, { sentAfter, sentPid, fromPoll: false });
         }
-        this.trimRoutes(d.ids);
-        this.loaded = true;
-        this.offline = "";
-        this.recompute();
-        for (const rt of toStart) if (this.routes.has(rt.id)) this.start(rt);
+      } catch (_) { /* keep existing state */ }
+      finally {
+        this.traceBusy = false;
+        this.traceInFlight = null;
+        cx?.notify();
       }
-    } catch (_) { /* keep existing state */ }
-    finally { this.traceBusy = false; cx.notify(); }
+    })();
     this.fetchQuotas(cx).catch(() => {});
+    return this.traceInFlight;
   }
 
   // provider quotas, refreshed on its own slower beat
@@ -1741,27 +1839,43 @@ export default class Routing extends View {
 
   closeMenus(cx) {
     if (!this.agentMenu && !this.profileMenuOpen) return;
+    this.agentMenuGen += 1;
     this.agentMenu = null;
     this.profileMenuOpen = false;
     cx?.notify();
   }
 
   async loadProfiles(cx) {
-    if (this.demo) return;
-    try {
-      const r = await this.runMagpieCli(["profiles"], 10000);
-      if (r?.code !== 0 && !r?.stdout) return;
-      const list = parseProfiles(r.stdout || "");
-      if (list.length) {
+    if (!this.cliControlState().targetOk) {
+      this.profiles = [];
+      this.profilesLoaded = false;
+      this.activeProfile = "";
+      this.profileMenuOpen = false;
+      return;
+    }
+    if (this.profilesInFlight) return this.profilesInFlight;
+    this.profilesInFlight = (async () => {
+      try {
+        const r = await this.runMagpieCli(["profiles"], 10000);
+        if (!this.cliControlState().targetOk) return;
+        this.profilesLoaded = true;
+        if (r?.code !== 0 && !r?.stdout) return;
+        const list = parseProfiles(r.stdout || "");
         this.profiles = list;
-        if (!this.activeProfile) this.activeProfile = list[0].name;
+        if (this.activeProfile && !list.some((p) => p.name === this.activeProfile)) {
+          this.activeProfile = "";
+        }
         cx?.notify();
+      } catch (_) { /* magpie CLI optional */ }
+      finally {
+        this.profilesInFlight = null;
       }
-    } catch (_) { /* magpie CLI optional */ }
+    })();
+    return this.profilesInFlight;
   }
 
   async applyProfile(name, cx) {
-    if (this.demo || this.profileBusy) return;
+    if (!this.cliControlState().writable || this.profileBusy) return;
     this.profileBusy = name;
     cx?.notify();
     try {
@@ -1783,7 +1897,7 @@ export default class Routing extends View {
   }
 
   async openMagpiePanel(cx) {
-    if (this.demo || this.remote) return;
+    if (!this.cliControlState().targetOk) return;
     try {
       await this.runMagpieCli(["panel"], 8000);
     } catch (_) { /* ignore */ }
@@ -1791,102 +1905,179 @@ export default class Routing extends View {
   }
 
   async openAgentMenu(agentId, rowIndex, cx) {
-    if (this.demo) return;
+    if (!this.cliControlState().writable) return;
+    const cliAgent = resolveCliAgent(agentId);
+    if (!cliAgent) return;
+    const gen = ++this.agentMenuGen;
+    const startWriteSeq = this.agentWriteDoneSeq.get(cliAgent) || 0;
     this.profileMenuOpen = false;
     this.hoveredQuotaProv = null;
     this.agentMenu = {
-      agent: agentId, rowIndex, loading: true, busy: "", error: "",
-      currentModel: "", currentEffort: "", models: [],
+      agent: agentId,
+      cliAgent,
+      rowIndex,
+      gen,
+      loading: true,
+      busy: this.agentWrites.get(cliAgent)?.op || "",
+      error: "",
+      currentModel: "",
+      currentEffort: "",
+      models: [],
     };
     cx?.notify();
     try {
       const [statusRes, modelsRes] = await Promise.all([
-        this.runMagpieCli([agentId], 10000),
-        this.runMagpieCli(["models", agentId], 12000),
+        this.runMagpieCli([cliAgent], 10000),
+        this.runMagpieCli(["models", cliAgent], 12000),
       ]);
-      if (!this.agentMenu || this.agentMenu.agent !== agentId) return;
+      if (!this.agentMenu || this.agentMenu.gen !== gen || !this.cliControlState().writable) return;
       const st = parseAgentStatus(statusRes?.stdout || "");
       const models = parseAgentModels(modelsRes?.stdout || "");
+      const wroteDuringLoad = (this.agentWriteDoneSeq.get(cliAgent) || 0) !== startWriteSeq;
+      const curModel = wroteDuringLoad ? (this.agentMenu.currentModel || st.model) : st.model;
+      const curEffort = wroteDuringLoad ? (this.agentMenu.currentEffort || st.effort) : st.effort;
       this.agentMenu = {
         ...this.agentMenu,
         loading: false,
-        currentModel: st.model,
-        currentEffort: st.effort,
+        busy: this.agentWrites.get(cliAgent)?.op || "",
+        currentModel: curModel,
+        currentEffort: curEffort,
         models,
-        error: (!st.model && !models.length) ? "No CLI config or models found for this agent." : "",
+        error: this.agentMenu.error || ((!curModel && !models.length) ? "No CLI config or models found for this agent." : ""),
       };
     } catch (e) {
-      if (!this.agentMenu || this.agentMenu.agent !== agentId) return;
-      this.agentMenu = { ...this.agentMenu, loading: false, error: String(e?.message || e).slice(0, 140) };
+      if (!this.agentMenu || this.agentMenu.gen !== gen) return;
+      this.agentMenu = {
+        ...this.agentMenu,
+        loading: false,
+        busy: this.agentWrites.get(cliAgent)?.op || "",
+        error: String(e?.message || e).slice(0, 140),
+      };
     }
     cx?.notify();
   }
 
   async setAgentModel(agentId, modelId, cx) {
-    if (!this.agentMenu || this.agentMenu.agent !== agentId || this.agentMenu.busy) return;
-    this.agentMenu = { ...this.agentMenu, busy: modelId, error: "" };
+    if (!this.cliControlState().writable) return;
+    const cliAgent = resolveCliAgent(agentId);
+    if (!cliAgent || this.agentWrites.has(cliAgent)) return;
+    const seq = ++this.agentWriteSeq;
+    this.agentWrites.set(cliAgent, { op: modelId, seq });
+    if (this.agentMenu?.cliAgent === cliAgent) {
+      this.agentMenu = { ...this.agentMenu, busy: modelId, error: "" };
+    }
     cx?.notify();
     try {
-      const r = await this.runMagpieCli([agentId, modelId], 12000);
+      const r = await this.runMagpieCli([cliAgent, modelId], 12000);
       if (r?.code === 0) {
-        const stRes = await this.runMagpieCli([agentId], 8000).catch(() => null);
+        const stRes = await this.runMagpieCli([cliAgent], 8000).catch(() => null);
         const st = parseAgentStatus(stRes?.stdout || "");
-        if (this.agentMenu?.agent === agentId) {
+        const resolvedModel = st.model || modelId.replace(/^magpie\//, "");
+        this.agentWriteDoneSeq.set(cliAgent, seq);
+        if (this.agentMenu?.cliAgent === cliAgent) {
           this.agentMenu = {
             ...this.agentMenu,
-            busy: "",
-            currentModel: st.model || modelId.replace(/^magpie\//, ""),
+            currentModel: resolvedModel,
             currentEffort: st.effort || this.agentMenu.currentEffort,
           };
         }
         notify({ title: agentLabel(agentId), level: "success", timeout: 3500, body: `Model → ${modelId}` });
       } else {
         const msg = stripAnsi(r?.stderr || r?.stdout || "failed").trim().split(/\r?\n/).pop();
-        if (this.agentMenu?.agent === agentId) this.agentMenu = { ...this.agentMenu, busy: "", error: msg || "Failed to switch model" };
+        if (this.agentMenu?.cliAgent === cliAgent) {
+          this.agentMenu = { ...this.agentMenu, error: msg || "Failed to switch model" };
+        }
       }
     } catch (e) {
-      if (this.agentMenu?.agent === agentId) this.agentMenu = { ...this.agentMenu, busy: "", error: String(e?.message || e) };
+      if (this.agentMenu?.cliAgent === cliAgent) {
+        this.agentMenu = { ...this.agentMenu, error: String(e?.message || e) };
+      }
+    } finally {
+      if (this.agentWrites.get(cliAgent)?.seq === seq) this.agentWrites.delete(cliAgent);
+      if (this.agentMenu?.cliAgent === cliAgent) {
+        this.agentMenu = { ...this.agentMenu, busy: this.agentWrites.get(cliAgent)?.op || "" };
+      }
+      cx?.notify();
     }
-    cx?.notify();
   }
 
   async setAgentEffort(agentId, effort, cx) {
-    if (!this.agentMenu || this.agentMenu.agent !== agentId || this.agentMenu.busy) return;
-    this.agentMenu = { ...this.agentMenu, busy: `effort:${effort}`, error: "" };
+    if (!this.cliControlState().writable) return;
+    const cliAgent = resolveCliAgent(agentId);
+    if (!cliAgent || this.agentWrites.has(cliAgent)) return;
+    const op = `effort:${effort}`;
+    const seq = ++this.agentWriteSeq;
+    this.agentWrites.set(cliAgent, { op, seq });
+    if (this.agentMenu?.cliAgent === cliAgent) {
+      this.agentMenu = { ...this.agentMenu, busy: op, error: "" };
+    }
     cx?.notify();
     try {
-      const r = await this.runMagpieCli([agentId, "effort", effort], 12000);
+      const r = await this.runMagpieCli([cliAgent, "effort", effort], 12000);
       if (r?.code === 0) {
-        if (this.agentMenu?.agent === agentId) {
-          this.agentMenu = { ...this.agentMenu, busy: "", currentEffort: effort };
+        this.agentWriteDoneSeq.set(cliAgent, seq);
+        if (this.agentMenu?.cliAgent === cliAgent) {
+          this.agentMenu = { ...this.agentMenu, currentEffort: effort };
         }
         notify({ title: agentLabel(agentId), level: "success", timeout: 3000, body: `Effort → ${effort}` });
       } else {
         const msg = stripAnsi(r?.stderr || r?.stdout || "failed").trim().split(/\r?\n/).pop();
-        if (this.agentMenu?.agent === agentId) this.agentMenu = { ...this.agentMenu, busy: "", error: msg || "Failed to set effort" };
+        if (this.agentMenu?.cliAgent === cliAgent) {
+          this.agentMenu = { ...this.agentMenu, error: msg || "Failed to set effort" };
+        }
       }
     } catch (e) {
-      if (this.agentMenu?.agent === agentId) this.agentMenu = { ...this.agentMenu, busy: "", error: String(e?.message || e) };
+      if (this.agentMenu?.cliAgent === cliAgent) {
+        this.agentMenu = { ...this.agentMenu, error: String(e?.message || e) };
+      }
+    } finally {
+      if (this.agentWrites.get(cliAgent)?.seq === seq) this.agentWrites.delete(cliAgent);
+      if (this.agentMenu?.cliAgent === cliAgent) {
+        this.agentMenu = { ...this.agentMenu, busy: this.agentWrites.get(cliAgent)?.op || "" };
+      }
+      cx?.notify();
     }
-    cx?.notify();
   }
 
   tightestQuotaLeft(group) {
     const accts = group?.accounts || [];
-    let best = null;
+    if (!accts.length) return null;
+    const oneEach = accts.every((a) => (a.allow || []).length <= 1);
+    const bestByPool = new Map();
     for (const a of accts) {
-      let acctTight = null;
       for (const h of a.allow || []) {
-        if (typeof h.left === "number") acctTight = acctTight == null ? h.left : Math.min(acctTight, h.left);
+        if (typeof h?.left !== "number" || !Number.isFinite(h.left)) continue;
+        const label = oneEach ? "" : String(h.label || "");
+        const cur = bestByPool.get(label);
+        if (cur === undefined || h.left > cur) bestByPool.set(label, h.left);
       }
-      if (acctTight != null) best = best == null ? acctTight : Math.max(best, acctTight);
     }
-    return best;
+    if (!bestByPool.size) {
+      let bestDirect = null;
+      for (const a of accts) {
+        if (typeof a?.left === "number" && Number.isFinite(a.left)) {
+          bestDirect = bestDirect == null ? a.left : Math.max(bestDirect, a.left);
+        }
+      }
+      return bestDirect;
+    }
+    let maxPool = -Infinity;
+    for (const v of bestByPool.values()) {
+      if (v > maxPool) maxPool = v;
+    }
+    return Number.isFinite(maxPool) ? maxPool : null;
   }
 
-  burnRateOf(provId) {
-    const pts = this.quotaHistory.get(provId);
-    if (!pts || pts.length < 2) return null;
+  burnRateOf(provId, now = Date.now()) {
+    const raw = this.quotaHistory.get(provId);
+    if (!raw?.length) return null;
+    const cutoff = now - 60 * 60 * 1000;
+    const pts = raw.filter((p) => p.ts >= cutoff);
+    if (pts.length !== raw.length) {
+      if (pts.length) this.quotaHistory.set(provId, pts);
+      else this.quotaHistory.delete(provId);
+    }
+    if (pts.length < 2) return null;
     const first = pts[0], last = pts[pts.length - 1];
     const dtMs = last.ts - first.ts;
     const drop = first.left - last.left;
@@ -1899,28 +2090,49 @@ export default class Routing extends View {
 
   recordQuotaTelemetry(now = Date.now()) {
     const cutoff = now - 60 * 60 * 1000;
-    for (const [provId, group] of Object.entries(this.quotas || {})) {
+    const quotas = this.quotas || {};
+    for (const [provId, group] of Object.entries(quotas)) {
       const left = this.tightestQuotaLeft(group);
-      if (left == null) continue;
-      let hist = this.quotaHistory.get(provId) || [];
+      if (left == null) {
+        this.quotaHistory.delete(provId);
+        this.prevQuotaLeft.delete(provId);
+        this.prevQuotaTier.delete(provId);
+        continue;
+      }
+      let hist = (this.quotaHistory.get(provId) || []).filter((p) => p.ts >= cutoff);
       hist.push({ ts: now, left });
-      hist = hist.filter((p) => p.ts >= cutoff);
       if (hist.length > 120) hist = hist.slice(-120);
       this.quotaHistory.set(provId, hist);
       this.maybeAlertQuota(provId, provLabel(group.name || provId), left, now);
+    }
+    for (const provId of [...this.quotaHistory.keys()]) {
+      if (!Object.hasOwn(quotas, provId)) {
+        const hist = (this.quotaHistory.get(provId) || []).filter((p) => p.ts >= cutoff);
+        if (hist.length) this.quotaHistory.set(provId, hist);
+        else {
+          this.quotaHistory.delete(provId);
+          this.prevQuotaLeft.delete(provId);
+          this.prevQuotaTier.delete(provId);
+        }
+      }
     }
   }
 
   maybeAlertQuota(provId, label, left, now = Date.now()) {
     const prev = this.prevQuotaLeft.get(provId);
+    const prevTier = this.prevQuotaTier.get(provId)
+      || (prev === undefined ? "ok" : prev <= 0 ? "exhausted" : prev <= 15 ? "low" : "ok");
+    const tier = left <= 0 ? "exhausted" : left <= 15 ? "low" : "ok";
     this.prevQuotaLeft.set(provId, left);
-    if (!this.alertsEnabled || this.demo || left > 15) return;
-    if (prev !== undefined && prev <= 15 && left >= prev) return;
+    this.prevQuotaTier.set(provId, tier);
+    if (!this.alertsEnabled || this.demo || tier === "ok") return;
+    if (prev !== undefined && prev <= 15 && left >= prev && tier === prevTier) return;
+    const escalated = tier === "exhausted" && prevTier !== "exhausted";
     const key = `q:${provId}`;
     const lastAt = this.alertCooldowns.get(key) || 0;
-    if (now - lastAt < 15 * 60 * 1000) return;
+    if (!escalated && now - lastAt < 15 * 60 * 1000) return;
     this.alertCooldowns.set(key, now);
-    const rate = this.burnRateOf(provId);
+    const rate = this.burnRateOf(provId, now);
     const tail = rate ? ` · ~${rate.pctPerHr}%/h` : "";
     notify({
       title: left <= 0 ? `Quota Exhausted: ${label}` : `Low Quota: ${label}`,
@@ -1938,10 +2150,20 @@ export default class Routing extends View {
       const first = this.notifiedErrors.values().next().value;
       this.notifiedErrors.delete(first);
     }
-    const seatKey = r.tries?.length ? this.seatOf(r, r.tries.length - 1) : null;
-    const acctRow = seatKey ? this.acctOf(seatKey) : null;
-    const acct = acctRow?.name || r.provider || "provider";
-    const key = `err:${seatKey || acct}`;
+    const lastTry = r.tries?.length ? r.tries[r.tries.length - 1] : null;
+    const tryMeta = lastTry ? (r.order || []).find((o) =>
+      (lastTry.id && (o.id === lastTry.id || o.who === lastTry.id)) ||
+      (!lastTry.id && lastTry.who && o.who === lastTry.who)) : null;
+    const seat = lastTry ? this.seatEntry(r, lastTry) : null;
+    const acctRow = seat?.key ? this.acctOf(seat.key) : null;
+    const explicitName = provLabel(lastTry?.name || tryMeta?.name || "");
+    const safeProvider = provLabel(r.provider || lastTry?.provider || tryMeta?.provider || "");
+    const acct = this.masked
+      ? ((explicitName && explicitName !== seat?.who && explicitName !== acctRow?.who && !explicitName.includes("@"))
+        ? explicitName
+        : (safeProvider || "provider"))
+      : (acctRow?.name || seat?.name || safeProvider || "provider");
+    const key = `err:${seat?.key || safeProvider || "provider"}`;
     const lastAt = this.alertCooldowns.get(key) || 0;
     if (now - lastAt < 2 * 60 * 1000) return;
     this.alertCooldowns.set(key, now);
@@ -1955,25 +2177,34 @@ export default class Routing extends View {
   }
 
   syncSharedStatus(now = Date.now()) {
-    if (typeof setShared !== "function" || this.demo) return;
+    if (typeof setShared !== "function" || this.demo) return false;
+    if (this.offline) {
+      const sig = "offline";
+      if (sig === this._lastSharedSig) return false;
+      this._lastSharedSig = sig;
+      try { setShared("routing.status", { active: 0, recentErr: false, lowQuota: false, offline: true }); } catch (_) { /* ignore */ }
+      return true;
+    }
     let active = 0;
     let recentErr = false;
-    let latestDone = null;
     for (const r of this.routes.values()) {
       if (!r.done) { active += 1; continue; }
-      if (!latestDone || r.id > latestDone.id) latestDone = r;
-      if (r.status >= 400 && r.time && (now - Date.parse(r.time)) < 5 * 60 * 1000) recentErr = true;
+      const startedAt = r.time ? Date.parse(r.time) : NaN;
+      const finishedAt = Number.isFinite(startedAt) ? startedAt + Math.max(0, Number(r.ms) || 0) : NaN;
+      if (r.status >= 400 && Number.isFinite(finishedAt) && (now - finishedAt) < 5 * 60 * 1000) {
+        recentErr = true;
+      }
     }
-    if (latestDone?.status >= 400) recentErr = true;
     let lowQuota = false;
     for (const group of Object.values(this.quotas || {})) {
       const left = this.tightestQuotaLeft(group);
       if (left != null && left <= 15) { lowQuota = true; break; }
     }
     const sig = `${active}|${recentErr ? 1 : 0}|${lowQuota ? 1 : 0}`;
-    if (sig === this._lastSharedSig) return;
+    if (sig === this._lastSharedSig) return false;
     this._lastSharedSig = sig;
     try { setShared("routing.status", { active, recentErr, lowQuota }); } catch (_) { /* ignore */ }
+    return true;
   }
 
   loadUpdateState() {
@@ -2365,11 +2596,11 @@ export default class Routing extends View {
         if (wins.length && q.balance) {
           barRows.push(div().text_size(8.5).text_color(t.muted).child(`Balance: ${q.balance}`));
         } else if (wins.length && q.balanceError) {
-          barRows.push(div().text_size(8.5).text_color(t.dim).child(`Balance: ${q.balanceError}`));
+          barRows.push(div().text_size(8.5).text_color(t.dim).child(`Balance: ${shortQuotaError(q.balanceError, this.masked)}`));
         } else if (!wins.length && q.balance) {
           barRows.push(div().text_size(9.5).text_color("#34d399").child(`${q.balance} left`));
         } else if (!wins.length && q.error) {
-          barRows.push(div().text_size(8.5).text_color(t.dim).child(`Balance: ${q.error}`));
+          barRows.push(div().text_size(8.5).text_color(t.dim).child(`Balance: ${shortQuotaError(q.error, this.masked)}`));
         } else if (!wins.length) {
           barRows.push(h_flex().items_center().gap(6)
             .child(div().size(5).rounded(2.5).bg("#34d399").flex_none())
@@ -2621,8 +2852,11 @@ export default class Routing extends View {
             parts.push(`${h.label ? `${h.label} ` : ""}${p}${reset}`);
           }
           if (!parts.length && q.balance) parts.push(String(q.balance));
-          else if (!parts.length && q.error) parts.push(String(q.error).slice(0, 60));
-          else if (!parts.length) parts.push("Ready");
+          else if (!parts.length && q.error) parts.push(shortQuotaError(q.error, this.masked).slice(0, 60));
+          else if (!parts.length && typeof q.left === "number" && Number.isFinite(q.left)) {
+            const pct = Math.round(q.left);
+            parts.push(pct <= 0 ? "Exhausted" : `${pct}%${q.leftResetsAt ? ` (${this.fmtUntil(q.leftResetsAt)})` : ""}`);
+          } else if (!parts.length) parts.push("Ready");
           lines.push(`${lbl ? `${lbl}: ` : ""}${parts.join(" · ")}`);
         }
         return lines.join("\n");
@@ -2980,6 +3214,12 @@ export default class Routing extends View {
       const on = liveAgents.has(a.id), ticked = this.ticks.has(a.id);
       const hovered = this.hoveredAgent === a.id;
       const selected = this.selectedAgent === a.id;
+      const cliAgent = resolveCliAgent(a.id);
+      const pillCli = this.cliControlState();
+      const canCli = Boolean(cliAgent && pillCli.writable);
+      const pillTip = canCli
+        ? "Click to filter · Right-click to switch model / effort"
+        : (cliAgent && pillCli.reason ? `Click to filter · ${pillCli.reason}` : "Click to filter");
       const iconName = resolveIconName(a.id, this.providerIcons);
       const leading = iconName !== "generic"
         ? div().id(`agent-icon-${a.id}`).size(13).flex_none().flex().items_center().justify_center()
@@ -2992,16 +3232,16 @@ export default class Routing extends View {
         .bg(selected ? t.selected : on ? rgba(a.color, 0.08) : hovered ? t.raised : t.canvas)
         .border(1).border_color(selected ? t.accent : on ? rgba(a.color, 0.85) : hovered ? t.selected : t.border)
         .when(!on && hasLive && !hovered && !selected, el => el.opacity(0.48))
-        .tooltip("Click to filter · Right-click to switch model / effort")
+        .tooltip(pillTip)
         .on_hover((isOn, cx2) => {
           if (isOn) this.hoveredAgent = a.id;
           else if (this.hoveredAgent === a.id) this.hoveredAgent = null;
           cx2.notify();
         })
-        .on_mouse_down("right", (_e, cx2) => {
+        .when(canCli, el => el.on_mouse_down("right", (_e, cx2) => {
           cx2.stop_propagation();
           this.spawnAction(cx2, (cx3) => this.openAgentMenu(a.id, i, cx3));
-        })
+        }))
         .on_click((_, cx2) => {
           this.selectedAgent = selected ? null : a.id;
           this.selectedAcct = null;
@@ -3116,9 +3356,10 @@ export default class Routing extends View {
     const inFlightAll = routes.filter(r => !r.done);
     const recentAll = routes.filter(r => r.done).slice(0, 40);
     const errorRoutes = recentAll.filter(r => r.status && r.status >= 400);
-    const activeFilter = (this.statusFilter === "active" && inFlightAll.length > 0)
-      || (this.statusFilter === "error" && errorRoutes.length > 0)
-      ? this.statusFilter : null;
+    if ((this.statusFilter === "active" && !inFlightAll.length) || (this.statusFilter === "error" && !errorRoutes.length)) {
+      this.statusFilter = null;
+    }
+    const activeFilter = this.statusFilter;
     const inFlight = activeFilter === "error" ? [] : inFlightAll;
     const recent = activeFilter === "active" ? [] : (activeFilter === "error" ? errorRoutes : recentAll);
 
@@ -3171,11 +3412,22 @@ export default class Routing extends View {
       const detailBarW = Math.max(110, Math.round(rowInnerW - 42));
       const buildSegBar = (segs, totalVal, hPx) => {
         if (!segs.length || totalVal <= 0) return null;
+        const segSum = segs.reduce((s, x) => s + x.val, 0);
+        if (segSum <= 0) return null;
+        const targetFillW = segSum >= totalVal
+          ? detailBarW
+          : Math.min(detailBarW, Math.max(segs.length * 2, Math.round((segSum / totalVal) * detailBarW)));
         let usedW = 0;
         const bars = segs.map((seg, idx) => {
-          const wPx = idx === segs.length - 1
-            ? Math.max(2, detailBarW - usedW)
-            : Math.max(2, Math.round((seg.val / totalVal) * detailBarW));
+          const remaining = Math.max(0, targetFillW - usedW);
+          const minReserve = (segs.length - 1 - idx) * 2;
+          let wPx;
+          if (idx === segs.length - 1) {
+            wPx = remaining;
+          } else {
+            const rawW = Math.max(2, Math.round((seg.val / totalVal) * detailBarW));
+            wPx = Math.min(rawW, Math.max(2, remaining - minReserve));
+          }
           usedW += wPx;
           return div().w(wPx).h(hPx).bg(seg.color).flex_none();
         });
@@ -3192,14 +3444,16 @@ export default class Routing extends View {
           const pPct = pWin > 0 ? Math.min(100, Math.round((pTok / pWin) * 100)) : null;
           const pCol = pPct == null ? t.muted : pPct >= 85 ? "#e26a6a" : pPct >= 60 ? "#d4b06a" : "#34d399";
           const parts = (r.prompt.parts || []).filter((p) => p?.tokens > 0);
+          const partSum = parts.reduce((s, p) => s + p.tokens, 0);
+          const ctxDenom = Math.max(pTok, partSum);
           const partSegs = parts.map((p) => ({
             val: p.tokens,
             color: PROMPT_PART_COLORS[p.kind] || "#94a3b8",
             kind: PROMPT_PART_NAMES[p.kind] || p.kind,
-            pct: Math.max(1, Math.round((p.tokens / pTok) * 100)),
+            pct: Math.max(1, Math.round((p.tokens / ctxDenom) * 100)),
           }));
           const topLegend = [...partSegs].sort((a, b) => b.val - a.val).slice(0, 3);
-          const barEl = buildSegBar(partSegs, partSegs.reduce((s, x) => s + x.val, 0), 5);
+          const barEl = buildSegBar(partSegs, ctxDenom, 5);
           ctxBlock = v_flex().gap(3).pt(1)
             .child(h_flex().items_center().justify_between().text_size(9).min_w(0)
               .child(div().text_color(t.muted).child(pWin > 0
@@ -3218,7 +3472,8 @@ export default class Routing extends View {
         const phases = computeTimingPhases(r);
         if (phases.length > 0) {
           const pSegs = phases.map((p) => ({ val: p.ms, color: p.color, label: p.label, ms: p.ms }));
-          const tBar = buildSegBar(pSegs, pSegs.reduce((s, x) => s + x.val, 0), 4);
+          const tDenom = Math.max(Math.round(r.ms || 0), pSegs.reduce((s, x) => s + x.val, 0));
+          const tBar = buildSegBar(pSegs, tDenom, 4);
           timingBlock = v_flex().gap(3).pt(1)
             .when(Boolean(tBar), (el) => el.child(tBar))
             .child(h_flex().gap(8).items_center().flex_wrap()
@@ -3375,13 +3630,14 @@ export default class Routing extends View {
     }
 
     const updatePill = this.updatePill(t);
-    const hasProfiles = !this.demo && this.profiles.length > 0;
+    const cliCtrl = this.cliControlState();
+    const hasProfiles = cliCtrl.writable && this.profiles.length > 0;
     const rawRemote = String(this.remoteLabel || "");
     const headerHost = (hasProfiles && Boolean(updatePill) && g.W < 340)
       ? ((/:\d+$/.exec(rawRemote)?.[0]) || rawRemote.replace(/^localhost\s*·\s*/i, ""))
       : this.remoteLabel;
     const showQuotaHover = !this.quotaOpen && Boolean(this.hoveredQuotaProv && this.quotas?.[this.hoveredQuotaProv]) && !this.agentMenu && !this.profileMenuOpen;
-    const popoverChildren = (!this.offline && (this.agentMenu || this.profileMenuOpen || showQuotaHover)) ? this.renderPopovers(t, g) : [];
+    const popoverChildren = (!this.offline && ((cliCtrl.writable && (this.agentMenu || this.profileMenuOpen)) || showQuotaHover)) ? this.renderPopovers(t, g) : [];
     return div().relative().size_full().bg(t.surface).text_color(t.foreground)
       .child(v_flex().size_full()
         .child(h_flex().px(12).pt(10).pb(6).gap(6).items_center()
@@ -3391,10 +3647,11 @@ export default class Routing extends View {
             .child(updatePill))
           .child(div().flex_1())
           .child(div().id("open-magpie").text_size(9.5).text_color(t.dim).min_w(0).truncate()
-            .when(!this.demo && !this.remote, el => el.cursor_pointer()
+            .when(cliCtrl.targetOk, el => el.cursor_pointer()
               .hover(s => s.text_color(t.foreground))
               .tooltip(`${rawRemote} · Click to open Magpie panel`)
               .on_click((_, cx2) => { this.spawnAction(cx2, (cx3) => this.openMagpiePanel(cx3)); }))
+            .when(!cliCtrl.targetOk && Boolean(cliCtrl.reason), el => el.tooltip(`${rawRemote} · ${cliCtrl.reason}`))
             .child(headerHost))
           .when(hasProfiles, el => el
             .child(h_flex().id("profile-toggle").px(5).py(1).gap(3).rounded(4).items_center().flex_none()
@@ -3497,12 +3754,17 @@ export default class Routing extends View {
 
   renderPopovers(t, g) {
     const out = [];
-    if (this.agentMenu || this.profileMenuOpen) {
+    const cliCtrl = this.cliControlState();
+    const showAgentMenu = Boolean(this.agentMenu && cliCtrl.writable);
+    const showProfileMenu = Boolean(this.profileMenuOpen && cliCtrl.writable);
+    if (showAgentMenu || showProfileMenu) {
       out.push(div().id("popover-backdrop").absolute().inset_0()
         .on_mouse_down("left", (_e, cx2) => { cx2.stop_propagation(); this.closeMenus(cx2); }));
     }
-    if (this.agentMenu) {
+    if (showAgentMenu) {
       const m = this.agentMenu;
+      const cliAgent = m.cliAgent || resolveCliAgent(m.agent);
+      const isBusy = Boolean(m.busy || (cliAgent && this.agentWrites.has(cliAgent)));
       const activeModel = (m.models || []).find((x) =>
         m.currentModel && (x.id === m.currentModel || x.id.endsWith(`/${m.currentModel}`)));
       const efforts = activeModel?.efforts?.length
@@ -3516,7 +3778,7 @@ export default class Routing extends View {
           .child(iconEl(m.agent, 13, hueOf(m.agent), this.providerIcons))
           .child(div().text_size(11).font_semibold().flex_1().truncate()
             .child(`${agentLabel(m.agent)} Quick Switch`))
-          .when(Boolean(m.busy), el => el.child(div().text_size(9).text_color(t.accent).child("Applying…")))
+          .when(isBusy, el => el.child(div().text_size(9).text_color(t.accent).child("Applying…")))
           .child(div().id("agent-menu-close").px(4).text_size(11).text_color(t.dim).cursor_pointer()
             .hover(s => s.text_color(t.foreground))
             .on_click((_, cx2) => { cx2.stop_propagation(); this.closeMenus(cx2); })
@@ -3529,13 +3791,14 @@ export default class Routing extends View {
             .child(h_flex().gap(4).items_center().flex_wrap()
               .children(efforts.map((eff) => {
                 const cur = m.currentEffort === eff;
-                return div().id(`effort-${eff}`).px(6).py(2).rounded(4).text_size(9.5).cursor_pointer()
+                return div().id(`effort-${eff}`).px(6).py(2).rounded(4).text_size(9.5)
                   .bg(cur ? t.selected : t.canvas)
                   .border(1).border_color(cur ? t.accent : t.border)
                   .text_color(cur ? t.foreground : t.muted)
                   .when(cur, e => e.font_semibold())
-                  .hover(s => s.bg(t.hover))
-                  .on_click((_, cx2) => { cx2.stop_propagation(); this.spawnAction(cx2, (cx3) => this.setAgentEffort(m.agent, eff, cx3)); })
+                  .when(isBusy, e => e.opacity(0.55))
+                  .when(!isBusy, e => e.cursor_pointer().hover(s => s.bg(t.hover))
+                    .on_click((_, cx2) => { cx2.stop_propagation(); this.spawnAction(cx2, (cx3) => this.setAgentEffort(m.agent, eff, cx3)); }))
                   .child(eff);
               })))))
         .when(!m.loading && m.models?.length > 0, el => el
@@ -3544,18 +3807,19 @@ export default class Routing extends View {
             .child(v_flex().id("agent-models-list").max_h(190).overflow_y_scroll().gap(2)
               .children(m.models.map((mod) => {
                 const isCur = Boolean(m.currentModel && (mod.id === m.currentModel || mod.id.endsWith(`/${m.currentModel}`)));
-                return h_flex().id(`pick-model-${mod.id}`).px(6).py(4).gap(6).rounded(5).items_center().cursor_pointer()
+                return h_flex().id(`pick-model-${mod.id}`).px(6).py(4).gap(6).rounded(5).items_center()
                   .bg(isCur ? t.selected : t.canvas)
                   .border(1).border_color(isCur ? t.accent : t.border)
-                  .hover(s => s.bg(t.hover))
-                  .on_click((_, cx2) => { cx2.stop_propagation(); this.spawnAction(cx2, (cx3) => this.setAgentModel(m.agent, mod.id, cx3)); })
+                  .when(isBusy, e => e.opacity(0.55))
+                  .when(!isBusy, e => e.cursor_pointer().hover(s => s.bg(t.hover))
+                    .on_click((_, cx2) => { cx2.stop_propagation(); this.spawnAction(cx2, (cx3) => this.setAgentModel(m.agent, mod.id, cx3)); }))
                   .child(div().size(5).rounded(2.5).bg(isCur ? t.accent : t.dim).flex_none())
                   .child(div().text_size(10).when(isCur, e => e.font_semibold()).text_color(isCur ? t.foreground : t.muted).truncate().flex_1().min_w(0)
                     .child(mod.label || shortModelName(mod.id)))
                   .child(div().text_size(8.5).text_color(t.dim).max_w(118).truncate().flex_none().child(mod.id));
               }))))));
     }
-    if (this.profileMenuOpen) {
+    if (showProfileMenu) {
       const popW = Math.min(264, Math.max(200, g.W));
       out.push(v_flex().id("profile-menu-popover").absolute().right(10).top(34).w(popW).overflow_hidden()
         .p(8).gap(4).rounded(8).bg(t.surface).border(1).border_color(t.accent)
@@ -3612,8 +3876,14 @@ export default class Routing extends View {
             .child(div().flex_1().min_w(4))
             .when(Boolean(q.balance), (el) => el.child(div().text_size(8.5).text_color("#34d399").flex_none().child(String(q.balance)))))
           .children(winRows)
-          .when(!wins.length && Boolean(q.error) && !q.balance, (el) => el.child(div().text_size(8.5).text_color("#e26a6a").truncate().child(String(q.error))))
-          .when(!wins.length && !q.error && !q.balance, (el) => el.child(div().text_size(8.5).text_color("#34d399").child("Ready")));
+          .when(!wins.length && Boolean(q.error) && !q.balance, (el) => el.child(div().text_size(8.5).text_color("#e26a6a").truncate().child(shortQuotaError(q.error, this.masked))))
+          .when(!wins.length && !q.error && !q.balance && typeof q.left === "number" && Number.isFinite(q.left), (el) => {
+            const pct = Math.round(q.left);
+            const exhausted = pct <= 0;
+            const col = exhausted ? "#e26a6a" : q.left < 10 ? "#e26a6a" : q.left < 30 ? "#d4b06a" : "#34d399";
+            return el.child(div().text_size(8.5).font_semibold().text_color(col).child(exhausted ? "Exhausted" : `${pct}% left`));
+          })
+          .when(!wins.length && !q.error && !q.balance && !(typeof q.left === "number" && Number.isFinite(q.left)), (el) => el.child(div().text_size(8.5).text_color("#34d399").child("Ready")));
       });
       out.push(v_flex().id("quota-hover-card").absolute().left(10).right(10).max_w(312).top(g.H + 106).overflow_hidden()
         .p(8).gap(6).rounded(8).bg(t.surface).border(1).border_color(t.border)

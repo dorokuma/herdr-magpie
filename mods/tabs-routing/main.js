@@ -82,8 +82,8 @@ export default class Tabs extends View {
     const panelButton = (id, label, icon) => {
       const on = panel && !panel.hidden && body?.active === id;
       const rStat = id === "routing" ? shared("routing.status") : null;
-      const rActive = Boolean(rStat?.active > 0);
-      const rWarn = !rActive && Boolean(rStat?.recentErr || rStat?.lowQuota);
+      const rActive = !rStat?.offline && Boolean(rStat?.active > 0);
+      const rWarn = !rStat?.offline && !rActive && Boolean(rStat?.recentErr || rStat?.lowQuota);
       return h_flex().id(`panel-${id}`).h(26).px(8).gap(5).flex_none().items_center().rounded(6)
         .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
         .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
