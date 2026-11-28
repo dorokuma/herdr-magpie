@@ -140,7 +140,7 @@ export function find(tree, id) {
 
 const palette = new Proxy({}, { get: (_t, k) => (typeof k === "symbol" ? undefined : "#808080") });
 
-function hostModules(env, paths) {
+function hostModules(env, paths, shared) {
   class View {}
   const ui = (extra) => new Proxy(extra, {
     get: (t, k) => (k in t ? t[k] : typeof k === "symbol" ? undefined : recorder(String(k))),
@@ -155,6 +155,8 @@ function hostModules(env, paths) {
       appHome: () => env.appHome(),
       readTextFile: (p) => env.readTextFile(p),
       notify: (n) => env.notify(n),
+      shared: (k) => shared.get(k),
+      setShared: (k, v) => { shared.set(k, v); return null; },
       // herdr's window(): the platform is what the mod branches on. A test
       // hands in its own answer (windows, or null as `herdr-app check` sees);
       // the default is the Linux panel most installs run on.
@@ -193,6 +195,7 @@ export async function loadMod({ source, home, exec, store, window: windowFn } = 
     window: windowFn,
   };
   const st = store ?? storage();
+  const shared = new Map();
   const id = `m${++seq}`;
   // pathBuilds: one entry per PathBuilder.stroke(width) the mod starts,
   // recording the width and the move/line/bezier geometry — what a frame
@@ -218,7 +221,7 @@ export async function loadMod({ source, home, exec, store, window: windowFn } = 
     apply(_t, _this, args) { return fresh("window", args); },
     construct(_t, args) { return fresh("window", args); },
   });
-  (globalThis.__herdrMagpie ??= {})[id] = { mods: hostModules(env, pathBuilds), localStorage: st, window: windowProxy };
+  (globalThis.__herdrMagpie ??= {})[id] = { mods: hostModules(env, pathBuilds, shared), localStorage: st, window: windowProxy };
 
   const swapped = [];
   let body = src.replace(IMPORT, (_all, names, from) => {
@@ -259,7 +262,7 @@ export async function loadMod({ source, home, exec, store, window: windowFn } = 
     o.init({}, cx);
     return Object.assign(o, over);
   };
-  return { Routing, env, notes, store: st, cx, make, paths: pathBuilds };
+  return { Routing, env, notes, store: st, shared, cx, make, paths: pathBuilds };
 }
 
 // --- a release on disk -------------------------------------------------------

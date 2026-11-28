@@ -4,6 +4,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { loadMod, find, texts, storage, ROOT, MAIN } from "./harness.mjs";
 
 // Total recorder nodes in a rendered tree: what one frame costs to build.
@@ -929,6 +932,701 @@ test("minimal stage style skips intermediate fly-frame redraws without dropping 
     const streamBefore = m.cx.redraws;
     frameTimer.fn(m.cx);
     assert.equal(m.cx.redraws, streamBefore + 1, "stream triggers frame redraw while flying");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("expanded diagnostic card shows prompt composition, timing waterfall, affinity, and masking while keeping try list last", async () => {
+  const m = await loadMod();
+  const o = m.make({ loaded: true, offline: "", size: { width: 340, height: 600 } });
+  o.agents = [{ id: "codex", color: "#5e95d7" }];
+  o.accounts = [{ key: "codex", name: "Codex", model: "gpt-6.2-sol" }];
+  o.routes.set(10, {
+    id: 10,
+    agent: "codex",
+    model: "codex/gpt-6.2-sol",
+    served: "gpt-6.2-sol",
+    effort: "max",
+    time: new Date("2026-11-28T08:00:00Z").toISOString(),
+    done: true,
+    status: 200,
+    tokens: 148000,
+    in: 400,
+    out: 1300,
+    ttft: 11200,
+    firstReasoning: 700,
+    firstText: 11200,
+    flow: 2700,
+    masking: 380,
+    ms: 14280,
+    usage: [{ in: 400, cache_read: 146000 }],
+    prompt: {
+      window: 500000,
+      tokens: 146304,
+      turns: 66,
+      parts: [
+        { kind: "system", tokens: 15284 },
+        { kind: "results", tokens: 74210 },
+        { kind: "chat", tokens: 35278 },
+        { kind: "tools", tokens: 10146 },
+      ],
+    },
+    affinity: { kept: true, cacheRead: 132736, why: "turn" },
+    masked: { n: 14, kinds: { SECRET: 6, PASSWORD: 1 } },
+    tries: [{ id: "codex", name: "Codex", status: 200, ms: 13900, done: true }],
+  });
+  o.expandedRouteId = 10;
+
+  const row = texts(find(o.render(m.cx), "req-row-10"));
+  assert.ok(row.includes("Context 146k / 500k"), row.join(" | "));
+  assert.ok(row.includes("29% · 66 turns"), row.join(" | "));
+  assert.ok(row.some((s) => s.includes("results 51%")), row.join(" | "));
+  assert.ok(row.some((s) => s.includes("Mask 380ms")), row.join(" | "));
+  assert.ok(row.some((s) => s.includes("Think 10.5s")), row.join(" | "));
+  assert.ok(row.some((s) => s.includes("Stream 2.7s")), row.join(" | "));
+  assert.ok(row.includes("Affinity kept (133k)"), row.join(" | "));
+  assert.ok(row.includes("14 masked (6 SECRET · 1 PASSWORD)"), row.join(" | "));
+  assert.ok(row.includes("effort max"), row.join(" | "));
+  assert.deepEqual(row.slice(-3), ["#1", "Codex", "200 · 13.9s"], "tries remain last inside detailBlock");
+});
+
+test("semantic error rows and header status filters toggle active/error buckets cleanly", async () => {
+  const m = await loadMod();
+  const o = m.make({ loaded: true, offline: "", size: { width: 340, height: 600 } });
+  o.agents = [{ id: "codex", color: "#5e95d7" }];
+  o.accounts = [{ key: "codex", name: "Codex", model: "gpt-6.2-sol" }];
+  o.routes.set(1, {
+    id: 1, agent: "codex", model: "codex/gpt-6.2-sol", served: "gpt-6.2-sol",
+    time: new Date("2026-11-28T08:00:00Z").toISOString(),
+    done: false, tries: [{ id: "codex", name: "Codex", done: false }],
+  });
+  o.routes.set(2, {
+    id: 2, agent: "codex", model: "codex/gpt-6.2-sol", served: "gpt-6.2-sol",
+    time: new Date("2026-11-28T07:59:00Z").toISOString(),
+    done: true, status: 429, tokens: 0, ms: 11700,
+    tries: [{ id: "codex", name: "Codex", status: 429, ms: 11700, done: true }],
+  });
+  o.routes.set(3, {
+    id: 3, agent: "codex", model: "codex/gpt-6.2-sol", served: "gpt-6.2-sol",
+    time: new Date("2026-11-28T07:58:00Z").toISOString(),
+    done: true, status: 200, tokens: 12000, ms: 3200, in: 100, out: 200,
+    tries: [{ id: "codex", name: "Codex", status: 200, ms: 3200, done: true }],
+  });
+
+  const treeAll = o.render(m.cx);
+  assert.ok(texts(find(treeAll, "filter-errors")).includes("1 err"));
+  assert.ok(texts(find(treeAll, "filter-active")).includes("1 active"));
+  assert.ok(texts(find(treeAll, "req-row-2")).includes("429 Rate Limit · 11.7s"));
+
+  o.statusFilter = "error";
+  const treeErr = o.render(m.cx);
+  assert.equal(find(treeErr, "req-row-1"), null);
+  assert.notEqual(find(treeErr, "req-row-2"), null);
+  assert.equal(find(treeErr, "req-row-3"), null);
+
+  o.statusFilter = "active";
+  const treeAct = o.render(m.cx);
+  assert.notEqual(find(treeAct, "req-row-1"), null);
+  assert.equal(find(treeAct, "req-row-2"), null);
+
+  // Without any failed routes, filter-errors chip disappears cleanly
+  o.statusFilter = null;
+  o.routes.delete(2);
+  assert.equal(find(o.render(m.cx), "filter-errors"), null);
+});
+
+test("magpie CLI quick-switch menus parse agent status, models, effort, and profiles and dispatch CLI commands", async () => {
+  const calls = [];
+  let mockModel = "codex/gpt-6.2-sol";
+  let mockEffort = "max";
+  const execMock = async (cmd, args) => {
+    calls.push([cmd, ...args]);
+    const raw = args.join(" ");
+    if (raw.includes("magpie 'profiles'") || raw === "profiles") {
+      return {
+        code: 0,
+        stdout: "  Default  agy Orchestrator (Neon) · codex gpt-6.2-sol\n  Saver    codex gpt-6-astra\n",
+      };
+    }
+    if (raw.includes("'models' 'codex'") || raw === "models codex") {
+      return {
+        code: 0,
+        stdout: [
+          "  Codex",
+          "  codex/gpt-6.2-sol       GPT-6.2-Sol  low/medium/high/xhigh/max/ultra",
+          "  codex/gpt-6-astra       GPT-6-Astra  low/medium/high/xhigh/max",
+          "  codex is shown only the models picked for it: 45 not picked",
+          "  Codex: 6 more models in its list, not exposed (not picked): old-model",
+        ].join("\n"),
+      };
+    }
+    const effMatch = /magpie 'codex' 'effort' '([^']+)'/.exec(raw);
+    if (effMatch) {
+      mockEffort = effMatch[1];
+      return { code: 0, stdout: "" };
+    }
+    const modMatch = /magpie 'codex' '([^']+)'/.exec(raw);
+    if (modMatch) {
+      mockModel = modMatch[1];
+      return { code: 0, stdout: "" };
+    }
+    if (raw.includes("magpie 'use' 'Saver'") || raw === "use Saver") {
+      return { code: 0, stdout: "" };
+    }
+    if (raw.includes("magpie 'codex'") || raw === "codex") {
+      const short = mockModel.replace(/^codex\//, "");
+      return { code: 0, stdout: `  Codex  ${short}  ·  effort ${mockEffort}  ·  memories ${mockModel}  ~/.codex/config.toml\n` };
+    }
+    return { code: 0, stdout: "" };
+  };
+
+  const m = await loadMod({ home: ROOT, exec: execMock });
+  const o = m.make({ loaded: true, offline: "", configReady: true, size: { width: 368, height: 600 } });
+  o.agents = [{ id: "codex", color: "#5e95d7" }];
+  o.accounts = [{ key: "codex", name: "Codex", model: "gpt-6.2-sol" }];
+
+  await o.loadProfiles(m.cx);
+  assert.equal(o.profiles.length, 2);
+  // Active profile is not guessed from list[0] before explicit switch
+  assert.equal(o.activeProfile, "");
+  assert.notEqual(find(o.render(m.cx), "profile-toggle"), null);
+
+  await o.openAgentMenu("codex", 0, m.cx);
+  assert.equal(o.agentMenu.currentModel, "gpt-6.2-sol");
+  assert.equal(o.agentMenu.currentEffort, "max");
+  assert.deepEqual(o.agentMenu.models.map((x) => x.id), ["codex/gpt-6.2-sol", "codex/gpt-6-astra"]);
+
+  const popTree = o.render(m.cx);
+  assert.notEqual(find(popTree, "agent-menu-popover"), null);
+  assert.notEqual(find(popTree, "effort-medium"), null);
+  assert.notEqual(find(popTree, "pick-model-codex/gpt-6-astra"), null);
+
+  await o.setAgentEffort("codex", "medium", m.cx);
+  assert.equal(o.agentMenu.currentEffort, "medium");
+  await o.setAgentModel("codex", "codex/gpt-6-astra", m.cx);
+  assert.equal(o.agentMenu.currentModel, "gpt-6-astra");
+  assert.ok(calls.some((c) => c.join(" ").includes("'codex' 'effort' 'medium'")));
+  assert.ok(calls.some((c) => c.join(" ").includes("'codex' 'codex/gpt-6-astra'")));
+
+  o.closeMenus(m.cx);
+  o.profileMenuOpen = true;
+  assert.notEqual(find(o.render(m.cx), "profile-menu-popover"), null);
+  await o.applyProfile("Saver", m.cx);
+  assert.equal(o.activeProfile, "Saver");
+  assert.equal(o.profileMenuOpen, false);
+
+  // Offline hides profile-toggle cleanly
+  o.offline = "offline";
+  assert.equal(find(o.render(m.cx), "profile-toggle"), null);
+});
+
+test("CLI controls enforce configReady, loopback baseUrl/remote target, and CLI agent allowlist + per-agent write locks", async () => {
+  const cliCmds = [];
+  let releaseModelWrite;
+  let modelWriteCount = 0;
+  let resolveSlowLoad;
+  const execMock = async (_cmd, args) => {
+    const raw = args.join(" ");
+    cliCmds.push(raw);
+    if (raw.includes("'claude' 'claude/sonnet'")) {
+      modelWriteCount += 1;
+      await new Promise((res) => { releaseModelWrite = res; });
+      return { code: 0, stdout: "" };
+    }
+    if (raw.includes("'models' 'claude'")) {
+      return { code: 0, stdout: "  Claude Code\n  claude/sonnet  Claude Sonnet  low/medium/high\n" };
+    }
+    if (raw.includes("'claude' 'effort'")) {
+      return { code: 0, stdout: "" };
+    }
+    if (raw.includes("'claude'") && !raw.includes("models")) {
+      return { code: 0, stdout: "  Claude Code  sonnet  ·  effort high  ~/.claude.json\n" };
+    }
+    if (raw.includes("'opencode'") && !raw.includes("models")) {
+      if (raw.includes("first")) return { code: 0, stdout: "" };
+      return new Promise((res) => {
+        resolveSlowLoad = () => res({ code: 0, stdout: "  OpenCode  stale-model\n" });
+      });
+    }
+    if (raw.includes("'models' 'opencode'")) {
+      return { code: 0, stdout: "  OpenCode\n  opencode/fresh  Fresh Model  low/high\n" };
+    }
+    return { code: 0, stdout: "  Work  codex gpt-6.2-sol\n" };
+  };
+
+  const m = await loadMod({ home: ROOT, exec: execMock });
+  const o = m.make({ loaded: true, offline: "" });
+
+  // 1. Gated before configReady, on remote gateway, or on non-default baseUrl
+  o.configReady = false;
+  await o.loadProfiles(m.cx);
+  await o.openAgentMenu("codex", 0, m.cx);
+  await o.openMagpiePanel(m.cx);
+  assert.equal(cliCmds.length, 0);
+
+  o.configReady = true;
+  o.remote = "prod-box";
+  await o.loadProfiles(m.cx);
+  await o.openAgentMenu("codex", 0, m.cx);
+  await o.openMagpiePanel(m.cx);
+  assert.equal(cliCmds.length, 0);
+
+  o.remote = null;
+  o.baseUrl = "http://127.0.0.1:4444";
+  await o.loadProfiles(m.cx);
+  await o.openAgentMenu("codex", 0, m.cx);
+  await o.openMagpiePanel(m.cx);
+  assert.equal(cliCmds.length, 0);
+
+  // Non-agent IDs never dispatch CLI even when loopback target is ready; loopback localhost alias is accepted
+  o.baseUrl = "http://localhost:3425/";
+  for (const bogus of ["magpie", "remote-magpie", "agent", "?", "pig"]) {
+    await o.openAgentMenu(bogus, 0, m.cx);
+  }
+  assert.equal(cliCmds.length, 0);
+
+  // Alias "claude-code" resolves to canonical "claude"
+  await o.openAgentMenu("claude-code", 0, m.cx);
+  assert.ok(cliCmds.some((s) => s.includes("'models' 'claude'")));
+  assert.equal(o.agentMenu.cliAgent, "claude");
+
+  // 2. Per-agent write lock survives closeMenus + reopen and rejects concurrent writes
+  const writeP = o.setAgentModel("claude-code", "claude/sonnet", m.cx);
+  assert.equal(o.agentWrites.has("claude"), true);
+  o.closeMenus(m.cx);
+  assert.equal(o.agentMenu, null);
+  assert.equal(o.agentWrites.has("claude"), true);
+
+  await o.openAgentMenu("claude", 0, m.cx);
+  assert.equal(o.agentMenu.busy, "claude/sonnet");
+  await o.setAgentModel("claude", "claude/sonnet", m.cx);
+  await o.setAgentEffort("claude", "low", m.cx);
+  assert.equal(modelWriteCount, 1);
+  assert.equal(cliCmds.some((s) => s.includes("'effort' 'low'")), false);
+
+  releaseModelWrite();
+  await writeP;
+  assert.equal(o.agentWrites.has("claude"), false);
+  assert.equal(o.agentMenu.busy, "");
+
+  // 3. Stale async openAgentMenu load superseded by closeMenus + opening another menu is discarded
+  const slowOpen = o.openAgentMenu("oc", 0, m.cx);
+  o.closeMenus(m.cx);
+  await o.openAgentMenu("claude", 1, m.cx);
+  const currentMenu = o.agentMenu;
+  resolveSlowLoad?.();
+  await slowOpen;
+  assert.equal(o.agentMenu, currentMenu);
+  assert.equal(o.agentMenu.cliAgent, "claude");
+
+  // 4. Empty profile list sets profilesLoaded so subsequent applyTraceSnapshot polls do not spam `magpie profiles`
+  let profileExecCount = 0;
+  const mEmptyProf = await loadMod({
+    home: ROOT,
+    exec: async (_cmd, args) => {
+      if (args.join(" ").includes("'profiles'")) profileExecCount += 1;
+      return { code: 0, stdout: "" };
+    },
+  });
+  const oe = mEmptyProf.make({ loaded: true, offline: "", configReady: true });
+  await oe.loadProfiles(mEmptyProf.cx);
+  assert.equal(profileExecCount, 1);
+  oe.applyTraceSnapshot({ object: "trace", seq: 1, routes: [], ids: [] }, mEmptyProf.cx);
+  oe.applyTraceSnapshot({ object: "trace", seq: 2, routes: [], ids: [] }, mEmptyProf.cx);
+  await Promise.resolve();
+  assert.equal(profileExecCount, 1);
+});
+
+test("masked privacy redacts quota errors and error notifications, and fetchQuotas/refreshAll synchronize safely", async () => {
+  const realNow = Date.now;
+  let now = Date.parse("2026-11-28T08:00:00Z");
+  Date.now = () => now;
+  try {
+    let quotaCalls = 0;
+    let releaseQuota;
+    let quotaPayload = { error: { message: "gateway temporarily down" } };
+    let tracePayload = {
+      object: "trace",
+      seq: 5,
+      pid: 101,
+      totals: { requests: 2, rerouted: 0, errors: 1 },
+      routes: [{
+        id: 201,
+        agent: "codex",
+        provider: "anthropic",
+        done: true,
+        status: 429,
+        time: new Date(now).toISOString(),
+        ms: 500,
+        tries: [{ id: "acct-7", who: "secret@corp.com", provider: "anthropic", done: true, status: 429 }],
+      }],
+      ids: [201],
+    };
+
+    const m = await loadMod({
+      home: ROOT,
+      exec: async (_cmd, args) => {
+        const u = args.find((x) => String(x).includes("http://")) || "";
+        if (u.includes("/quotas")) {
+          quotaCalls += 1;
+          await new Promise((res) => { releaseQuota = res; });
+          return { code: 0, stdout: JSON.stringify(quotaPayload) };
+        }
+        return { code: 0, stdout: JSON.stringify(tracePayload) };
+      },
+    });
+    const o = m.make({ loaded: true, offline: "", seq: 10, pid: 101 });
+    o.quotas = { codex: { name: "Codex", accounts: [{ left: 0, allow: [{ label: "5h", left: 0 }] }] } };
+    o.syncSharedStatus(now);
+    assert.equal(m.shared.get("routing.status").lowQuota, true);
+
+    // Concurrent fetchQuotas calls coalesce single-flight; { error } payload preserves existing quotas
+    const q1 = o.fetchQuotas(m.cx);
+    const q2 = o.fetchQuotas(m.cx);
+    await new Promise((r) => setTimeout(r, 0));
+    releaseQuota();
+    await assert.rejects(q1, /gateway temporarily down/);
+    await assert.rejects(q2, /gateway temporarily down/);
+    assert.equal(quotaCalls, 1);
+    assert.ok(o.quotas.codex);
+    assert.equal(m.shared.get("routing.status").lowQuota, true);
+
+    // refreshAll with seq rollback (5 < 10) clears stale routes & notifiedErrors and notifies once with masked target
+    o.routes.set(1, { id: 1, done: true, status: 200 });
+    o.notifiedErrors.add(201);
+    quotaPayload = {
+      data: [{
+        provider: "anthropic",
+        name: "Anthropic",
+        user: "secret@corp.com",
+        error: "403 forbidden for secret@corp.com",
+        windows: [],
+      }],
+    };
+    const refreshP = o.refreshAll(m.cx);
+    await refreshP;
+    const bgQ = o.quotaInFlight;
+    releaseQuota?.();
+    await bgQ;
+    assert.equal(o.routes.has(1), false);
+    assert.equal(o.routes.has(201), true);
+    assert.equal(m.notes.length, 1);
+    assert.equal(m.notes[0].body.includes("secret@corp.com"), false);
+    assert.match(m.notes[0].body, /Codex → anthropic \(429 Rate Limit\)/);
+
+    // Same seat outside top-6 on-stage slots uses layout-independent seat key for 2m cooldown
+    o.accounts = [];
+    o.maybeAlertError({
+      id: 202,
+      agent: "codex",
+      provider: "anthropic",
+      done: true,
+      status: 500,
+      tries: [{ id: "acct-7", who: "secret@corp.com", provider: "anthropic", done: true, status: 500 }],
+    }, now + 30_000);
+    assert.equal(m.notes.length, 1);
+
+    // Unmasked shows raw target
+    o.masked = false;
+    o.maybeAlertError({
+      id: 203,
+      agent: "codex",
+      provider: "anthropic",
+      done: true,
+      status: 500,
+      tries: [{ id: "acct-7", name: "WorkAcct", who: "secret@corp.com", provider: "anthropic", done: true, status: 500 }],
+    }, now + 150_000);
+    assert.equal(m.notes.length, 2);
+    assert.match(m.notes[1].body, /WorkAcct/);
+
+    // Hover card error redaction toggles cleanly with masked flag
+    o.masked = true;
+    o.quotas = {
+      anthropic: {
+        name: "Anthropic",
+        accounts: [{ key: "u:s", user: "secret@corp.com", error: "403 forbidden for secret@corp.com", windows: [] }],
+      },
+    };
+    o.quotaOpen = false;
+    o.hoveredQuotaProv = "anthropic";
+    const maskedCard = texts(find(o.render(m.cx), "quota-hover-card")).join(" ");
+    assert.equal(maskedCard.includes("secret@corp.com"), false);
+    assert.match(maskedCard, /Error \(403\)/);
+
+    o.masked = false;
+    const unmaskedCard = texts(find(o.render(m.cx), "quota-hover-card")).join(" ");
+    assert.match(unmaskedCard, /403 forbidden for secret@corp\.com/);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("tightestQuotaLeft handles multi-pool accounts, {left:0} hover card, stale burn-rate pruning, and shared status completion expiry", async () => {
+  const realNow = Date.now;
+  let now = Date.parse("2026-11-28T08:00:00Z");
+  Date.now = () => now;
+  try {
+    const m = await loadMod({ home: ROOT });
+    const o = m.make({ loaded: true, offline: "", size: { width: 340, height: 600 } });
+
+    // Multi-pool complementary accounts & single-account partial exhaustion never false-exhaust
+    assert.equal(o.tightestQuotaLeft({
+      accounts: [
+        { allow: [{ label: "Claude", left: 0 }, { label: "Gemini", left: 80 }] },
+        { allow: [{ label: "Claude", left: 80 }, { label: "Gemini", left: 0 }] },
+      ],
+    }), 80);
+    assert.equal(o.tightestQuotaLeft({
+      accounts: [{ allow: [{ label: "Claude", left: 0 }, { label: "Gemini", left: 80 }] }],
+    }), 80);
+    assert.equal(o.tightestQuotaLeft({
+      accounts: [{ allow: [{ label: "Claude", left: 0 }, { label: "Gemini", left: 0 }] }],
+    }), 0);
+
+    // { left: 0, windows: [] } shows Exhausted instead of Ready in collapsed hover card
+    o.quotas = { codex: { name: "Codex", accounts: [{ key: "a", left: 0, windows: [], allow: [{ label: "5h", left: 0 }] }] } };
+    o.quotaOpen = false;
+    o.hoveredQuotaProv = "codex";
+    const cardTxt = texts(find(o.render(m.cx), "quota-hover-card")).join(" ");
+    assert.match(cardTxt, /Exhausted/);
+    assert.equal(/\bReady\b/.test(cardTxt), false);
+
+    // Quota escalation 12% -> 0% fires immediately even inside 15m cooldown; >60m burn rate expires on read
+    o.quotas = { codex: { name: "Codex", accounts: [{ allow: [{ label: "5h", left: 30 }] }] } };
+    o.recordQuotaTelemetry(now);
+    now += 30 * 60 * 1000;
+    o.quotas = { codex: { name: "Codex", accounts: [{ allow: [{ label: "5h", left: 12 }] }] } };
+    o.recordQuotaTelemetry(now);
+    assert.equal(m.notes.length, 1);
+    assert.match(m.notes[0].title, /Low Quota/);
+    assert.ok(o.burnRateOf("codex", now));
+
+    now += 5 * 60 * 1000;
+    o.quotas = { codex: { name: "Codex", accounts: [{ allow: [{ label: "5h", left: 0 }] }] } };
+    o.recordQuotaTelemetry(now);
+    assert.equal(m.notes.length, 2);
+    assert.match(m.notes[1].title, /Quota Exhausted/);
+
+    // Advance 61 minutes without new quota samples -> stale history is pruned on burnRateOf read
+    now += 61 * 60 * 1000;
+    assert.equal(o.burnRateOf("codex", now), null);
+
+    // Overlapping computeTimingPhases durations stay unscaled
+    o.routes.set(1, {
+      id: 1,
+      agent: "codex",
+      done: true,
+      status: 200,
+      ms: 1000,
+      masking: 400,
+      firstReasoning: 100,
+      firstText: 600,
+      flow: 600,
+      tries: [{ id: "c", name: "Codex", status: 200, ms: 900, done: true, net: { tls: 300 } }],
+    });
+    o.expandedRouteId = 1;
+    const rowTxt = texts(find(o.render(m.cx), "req-row-1")).join(" ");
+    assert.match(rowTxt, /Mask 400ms/);
+    assert.match(rowTxt, /Net 300ms/);
+    assert.match(rowTxt, /Think 500ms/);
+    assert.match(rowTxt, /Stream 600ms/);
+
+    // recentErr uses completion time (start + ms) and expires cleanly after 5m; statusFilter auto-resets when bucket empties
+    o.routes.clear();
+    o.routes.set(2, {
+      id: 2,
+      agent: "codex",
+      done: true,
+      status: 500,
+      time: new Date(now - 6 * 60 * 1000).toISOString(),
+      ms: 2 * 60 * 1000, // finished 4m ago
+    });
+    o.quotas = {};
+    o.syncSharedStatus(now);
+    assert.deepEqual(m.shared.get("routing.status"), { active: 0, recentErr: true, lowQuota: false });
+
+    // 2m later -> finished 6m ago -> recentErr clears even though route #2 is still latestDone
+    now += 2 * 60 * 1000;
+    o.syncSharedStatus(now);
+    assert.deepEqual(m.shared.get("routing.status"), { active: 0, recentErr: false, lowQuota: false });
+
+    // Offline publishes offline:true to tabs-routing and suppresses tab indicator dots
+    o.offline = "Remote trace error";
+    o.syncSharedStatus(now);
+    assert.deepEqual(m.shared.get("routing.status"), { active: 0, recentErr: false, lowQuota: false, offline: true });
+
+    // statusFilter auto-resets to null when 0 matching errors remain
+    o.offline = "";
+    o.statusFilter = "error";
+    o.routes.clear();
+    o.render(m.cx);
+    assert.equal(o.statusFilter, null);
+
+    // Verify mods/tabs-routing hides routing-tab-dot when routing.status has offline:true
+    const tabsSrc = fs.readFileSync(path.join(ROOT, "mods/tabs-routing/main.js"), "utf8");
+    let sharedStatus = { active: 2, recentErr: true, lowQuota: true, offline: true };
+    const mk = (lbl) => {
+      const n = { tag: lbl, id: null, kids: [] };
+      const p = new Proxy(() => p, {
+        get(_t, k) {
+          if (k === "__node") return n;
+          if (k === "then") return undefined;
+          if (k === Symbol.toPrimitive) return () => `[${lbl}]`;
+          if (k === "id") return (v) => { n.id = String(v); return p; };
+          if (k === "child") return (c) => { n.kids.push(c); return p; };
+          if (k === "children") return (cs) => { for (const c of cs || []) n.kids.push(c); return p; };
+          if (k === "when") return (c, f) => { if (c && typeof f === "function") f(p); return p; };
+          if (k === "when_some") return (v, f) => { if (v != null && typeof f === "function") f(p, v); return p; };
+          return () => p;
+        },
+        apply() { return mk(lbl); },
+      });
+      return p;
+    };
+    const fakeMods = {
+      "gpui-kit": { View: class {}, div: () => mk("div"), svg: () => mk("svg"), image: () => mk("image") },
+      "gpui-base": { h_flex: () => mk("h_flex") },
+      herdr: {
+        spaces: () => [{ id: "sp1", active: true, tabs: [{ id: "t1", name: "Tab 1", active: true }] }],
+        panes: () => [],
+        run: () => {},
+        openOverlay: () => {},
+        theme: () => ({}),
+        window: () => ({ platform: "linux" }),
+        shared: (k) => (k === "routing.status" ? sharedStatus : null),
+        layout: () => ({
+          id: "root",
+          children: [
+            { id: "panel", hidden: false, children: [] },
+            { id: "panel-body", active: "files", children: [] },
+          ],
+        }),
+        settings: () => ({ zoom: 1 }),
+      },
+    };
+    globalThis.__tabsRoutingTestMods = fakeMods;
+    globalThis.__tabsRoutingTestStore = storage();
+    const rewritten = "const localStorage = globalThis.__tabsRoutingTestStore;\n"
+      + tabsSrc.replace(/^import\s+\{([^}]+)\}\s+from\s+["']([^"']+)["'];/gm,
+        (_a, names, from) => `const {${names}} = globalThis.__tabsRoutingTestMods[${JSON.stringify(from)}];`);
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tabs-routing-test-"));
+    const tmpFile = path.join(tmpDir, "main.mjs");
+    fs.writeFileSync(tmpFile, rewritten);
+    try {
+      const TabsView = (await import(pathToFileURL(tmpFile).href)).default;
+      const tv = new TabsView();
+      tv.init({}, m.cx);
+      assert.equal(find(tv.render(), "routing-tab-dot"), null);
+      sharedStatus = { active: 1, recentErr: false, lowQuota: false };
+      assert.notEqual(find(tv.render(), "routing-tab-dot"), null);
+    } finally {
+      delete globalThis.__tabsRoutingTestMods;
+      delete globalThis.__tabsRoutingTestStore;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("quota burn-rate calculation and proactive error/quota alert cooldowns behave cleanly", async () => {
+  const realNow = Date.now;
+  let now = Date.parse("2026-11-28T08:00:00Z");
+  Date.now = () => now;
+  try {
+    const store = storage();
+    const m = await loadMod({ home: ROOT, store });
+    const o = m.make({ loaded: true, offline: "" });
+    assert.equal(o.alertsEnabled, true);
+
+    o.quotas = { codex: { name: "Codex", accounts: [{ allow: [{ label: "5h", left: 30 }] }] } };
+    o.recordQuotaTelemetry(now);
+    assert.equal(m.notes.length, 0);
+
+    // 30m later, quota drops by 18% -> burn ~36%/h and crosses <=15% alert threshold
+    now += 30 * 60 * 1000;
+    o.quotas = {
+      codex: {
+        name: "Codex",
+        accounts: [{
+          key: "codex-main",
+          alias: "Pro",
+          balance: "62500 credits",
+          left: 12,
+          windows: [{ name: "7 days", used: 88, remaining: 12, resetsAt: "2026-11-28T11:30:00Z" }],
+          allow: [{ label: "7d", left: 12 }],
+        }],
+      },
+    };
+    o.recordQuotaTelemetry(now);
+    const rate = o.burnRateOf("codex", now);
+    assert.equal(rate.pctPerHr, 36);
+    assert.equal(m.notes.length, 1);
+    assert.match(m.notes[0].title, /Low Quota: Codex/);
+    assert.match(m.notes[0].body, /12% remaining · ~36%\/h/);
+
+    // Collapsed quota hover card shows structured window details + burn rate without blocking backdrop
+    o.quotaOpen = false;
+    o.hoveredQuotaProv = "codex";
+    const hoverTree = o.render(m.cx);
+    assert.equal(find(hoverTree, "popover-backdrop"), null);
+    const hoverCard = find(hoverTree, "quota-hover-card");
+    assert.notEqual(hoverCard, null);
+    assert.match(texts(hoverCard).join(" "), /62500 credits/);
+    assert.match(texts(hoverCard).join(" "), /~36%\/h/);
+
+    // Expanded quota view hides hover card and renders inline burn-rate badge on provider header
+    o.quotaOpen = true;
+    const expandedTree = o.render(m.cx);
+    assert.equal(find(expandedTree, "quota-hover-card"), null);
+    assert.match(texts(find(expandedTree, "quota-prov-hdr-codex")).join(" "), /~36%\/h/);
+
+    // Repeat within 15m cooldown (without exhaustion escalation) -> no duplicate notification
+    now += 5 * 60 * 1000;
+    o.quotas = { codex: { name: "Codex", accounts: [{ allow: [{ label: "5h", left: 10 }] }] } };
+    o.recordQuotaTelemetry(now);
+    assert.equal(m.notes.length, 1);
+
+    // Failed route fires one notification per cooldown (even before muting)
+    o.maybeAlertError({ id: 99, agent: "codex", provider: "codex", done: true, status: 429 }, now);
+    assert.equal(m.notes.length, 2);
+    assert.match(m.notes[1].body, /Codex → codex \(429 Rate Limit\)/);
+
+    o.maybeAlertError({
+      id: 98,
+      agent: "codex",
+      provider: "codex",
+      done: true,
+      status: 500,
+      tries: [{ id: "codex-a", provider: "codex", done: true, status: 500 }],
+    }, now + 30 * 1000);
+    o.maybeAlertError({
+      id: 101,
+      agent: "codex",
+      provider: "codex",
+      done: true,
+      status: 502,
+      tries: [{ id: "codex-a", provider: "codex", done: true, status: 502 }],
+    }, now + 60 * 1000);
+    assert.equal(m.notes.length, 3);
+
+    // Shared top-bar status reflects lowQuota, active, and recentErr cleanly
+    o.syncSharedStatus(now);
+    assert.deepEqual(m.shared.get("routing.status"), { active: 0, recentErr: false, lowQuota: true });
+    o.routes.set(1, { id: 1, done: false });
+    o.routes.set(2, { id: 2, done: true, status: 429, time: new Date(now).toISOString() });
+    o.quotas = { codex: { name: "Codex", accounts: [{ allow: [{ label: "5h", left: 90 }] }] } };
+    o.syncSharedStatus(now);
+    assert.deepEqual(m.shared.get("routing.status"), { active: 1, recentErr: true, lowQuota: false });
+
+    // Muting persists and suppresses notifications
+    o.toggleAlerts(m.cx);
+    assert.equal(o.alertsEnabled, false);
+    assert.equal(store.data.get("routing.alerts"), "false");
+    now += 20 * 60 * 1000;
+    o.maybeAlertError({ id: 100, agent: "codex", provider: "codex", done: true, status: 500 }, now);
+    assert.equal(m.notes.length, 3);
   } finally {
     Date.now = realNow;
   }
