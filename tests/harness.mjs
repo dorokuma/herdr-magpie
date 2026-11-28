@@ -34,7 +34,7 @@ export function tmpdir(tag = "t") {
 // (div().flex().child(...).when(cond, (el) => ...)) runs to the end. What a
 // node was given as children is kept, which is what texts() reads back.
 function recorder(label, seed) {
-  const node = { label, id: null, kids: [], ...seed };
+  const node = { label, id: null, kids: [], methods: new Set(), args: {}, ...seed };
   const fn = function () {};
   const p = new Proxy(fn, {
     get(_t, k) {
@@ -47,8 +47,15 @@ function recorder(label, seed) {
       if (k === "children") return (cs) => { for (const c of cs || []) node.kids.push(c); return p; };
       if (k === "when") return (cond, f) => { if (cond && typeof f === "function") f(p); return p; };
       if (k === "when_some") return (v, f) => { if (v != null && typeof f === "function") f(p, v); return p; };
-      // any other builder method: styling and event wiring, which draw no text
-      return () => p;
+      // every other builder method writes down that it ran — the styling and
+      // event wiring that draw no text, but say whether a control was wired
+      // live (on_click) or greyed (opacity). opacity()/cursor_pointer() keep
+      // their argument too: 0.55 is the popovers' disabled dim.
+      return (...a) => {
+        node.methods.add(String(k));
+        if (k === "opacity" || k === "cursor_pointer") node.args[String(k)] = a[0];
+        return p;
+      };
     },
     // div("text"), PathBuilder.stroke(1), new Scrollbar(...): a call makes a
     // fresh node; a leading string is its content
