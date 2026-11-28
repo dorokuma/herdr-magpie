@@ -413,6 +413,11 @@ export default class Routing extends View {
     // after its route row falls off the 60-entry history — the red dot in
     // the tab bar measures real time, not how many rows are still buffered
     this.lastErrorDoneAt = 0;
+    // each failed route's completion time, capped at the moment it was first
+    // observed locally: the row scan and the eviction memory read this one
+    // value, so both expire at the same local instant under a fast remote
+    // clock, and repeat sightings never push it forward
+    this.routeDoneAt = new Map();
     this.quotaFetchSeq = 0;
     this.quotaInFlight = null;
     this.quotaHistory = new Map();
@@ -501,9 +506,14 @@ export default class Routing extends View {
       // the error this machine does not produce) is a broken install, not
       // an unconfigured one — refusing CLI control beats silently writing
       // into the wrong magpie's agent configs.
+      // A structured error code is the machine's own answer and never gets
+      // overridden by what the message happens to say: EACCES whose path
+      // spells "not found" is still a permission failure, not an absent file.
+      // Only without a code does the message's spelling count at all.
       const msg = String(e?.message || e);
-      const notFound = e?.code === "ENOENT"
-        || /ENOENT|no such file|not found/i.test(msg);
+      const notFound = (e && typeof e.code === "string")
+        ? e.code === "ENOENT"
+        : /ENOENT|no such file|not found/i.test(msg);
       if (notFound) rawCfg = null;
       else { rawCfg = null; this.configError = true; }
     }
@@ -518,12 +528,21 @@ export default class Routing extends View {
         this.configError = true;
       } else {
         try {
-          cfg = JSON.parse(stripped);
-          if (cfg.remote !== undefined) this.remote = cfg.remote || null;
-          if (cfg.baseUrl) this.baseUrl = String(cfg.baseUrl).replace(/\/$/, "");
-          if (cfg.label) this.remoteLabel = String(cfg.label);
-          else if (this.remote) this.remoteLabel = `${this.remote} · ${this.baseUrl.replace(/^https?:\/\//, "")}`;
-          if (cfg.stageStyle && STAGE_STYLES.includes(cfg.stageStyle)) this.stageStyle = cfg.stageStyle;
+          const parsed = JSON.parse(stripped);
+          // "null", "[]" or a bare string parses fine and is no config either:
+          // treating one as a default-local gateway writes into whatever
+          // magpie runs on this machine. Only a plain object is a config.
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            cfg = null;
+            this.configError = true;
+          } else {
+            cfg = parsed;
+            if (cfg.remote !== undefined) this.remote = cfg.remote || null;
+            if (cfg.baseUrl) this.baseUrl = String(cfg.baseUrl).replace(/\/$/, "");
+            if (cfg.label) this.remoteLabel = String(cfg.label);
+            else if (this.remote) this.remoteLabel = `${this.remote} · ${this.baseUrl.replace(/^https?:\/\//, "")}`;
+            if (cfg.stageStyle && STAGE_STYLES.includes(cfg.stageStyle)) this.stageStyle = cfg.stageStyle;
+          }
         } catch (_) {
           // the file is there but does not parse: that is a broken install,
           // not an unconfigured one. Refusing CLI control beats silently
@@ -542,7 +561,7 @@ export default class Routing extends View {
     }
     this.configReady = true;
     this.discoverProviders().then(() => cx.notify()).catch(() => {});
-    this.loadProfiles(cx).catch(() => {});
+    if (!this.configError) this.loadProfiles(cx).catch(() => {});
     this.readModVersion().then(() => {
       this.announceVersion();
       cx.notify();
@@ -673,13 +692,13 @@ export default class Routing extends View {
   // starts a new generation exactly once, however many in-flight requests
   // of the old generation report it.
   applyTraceSnapshot(d, cx, { sentAfter = this.seq, sentGen = this.traceGen, fromPoll = false } = {}) {
-    if (!d || d.object !== "trace") throw new Error(d?.error?.message || "not a trace");
-    // The generation moved on since this request went out: the answer
-    // belongs to the dead or superseded one — the same pid restarted or a
-    // lingering reply of the old process — and applying it would roll seq
-    // and routes back over the gateway now in charge. Whatever it carries,
-    // it is dropped outright.
+    // The generation check rides ahead of even the payload validation: the
+    // answer belongs to the dead or superseded generation — the same pid
+    // restarted or a lingering reply of the old process — and whatever it
+    // carries (a trace, an error body, a proxy's HTML) it is dropped
+    // outright, before it can fail this generation as a "not a trace".
     if (sentGen !== this.traceGen) return false;
+    if (!d || d.object !== "trace") throw new Error(d?.error?.message || "not a trace");
     const newProcess = d.pid != null && this.pid != null && d.pid !== this.pid;
     if (!newProcess && sentAfter !== this.seq && d.seq <= this.seq) return false;
     if (d.seq < this.seq || newProcess) {
@@ -687,6 +706,7 @@ export default class Routing extends View {
       this.flights.clear();
       this.notifiedErrors.clear();
       this.lastErrorDoneAt = 0;
+      this.routeDoneAt.clear();
       this.traceGen += 1;
     }
     this.seq = d.seq;
@@ -712,8 +732,17 @@ export default class Routing extends View {
         const finishedAt = Number.isFinite(startedAt) ? startedAt + Math.max(0, Number(r.ms) || 0) : NaN;
         // a remote gateway whose clock runs ahead would stretch the red
         // dot's five minutes by however much it is fast — the failure's
-        // completion time never sits in the local future
-        const doneAt = Number.isFinite(finishedAt) ? Math.min(finishedAt, Date.now()) : NaN;
+        // completion time never sits in the local future. The FIRST sighting
+        // of this failure fixes the capped time for good: re-sighting the
+        // same row in later snapshots must not push it forward and keep the
+        // dot alive forever, and the row scan in syncSharedStatus reads this
+        // very value, so a surviving row and an evicted one expire at the
+        // same local instant.
+        if (!this.routeDoneAt.has(r.id)) {
+          const capped = Number.isFinite(finishedAt) ? Math.min(finishedAt, Date.now()) : NaN;
+          if (Number.isFinite(capped)) this.routeDoneAt.set(r.id, capped);
+        }
+        const doneAt = this.routeDoneAt.get(r.id) ?? NaN;
         if (Number.isFinite(doneAt) && doneAt > (this.lastErrorDoneAt || 0)) this.lastErrorDoneAt = doneAt;
         if (first) this.notifiedErrors.add(r.id);
         else if (!prev?.done) this.maybeAlertError(r);
@@ -736,14 +765,21 @@ export default class Routing extends View {
 
   async poll(cx) {
     for (;;) {
+      let sentGen = this.traceGen;
       try {
         const sentAfter = this.seq;
-        const sentGen = this.traceGen;
+        sentGen = this.traceGen;
         const url = `${this.baseUrl}/v1/magpie/trace?after=${sentAfter}${this.loaded ? "&wait=1" : ""}`;
         const r = await exec("curl", ["-sS", "--max-time", "35", url], this.execOpts(40000));
         const d = JSON.parse(r.stdout);
         this.applyTraceSnapshot(d, cx, { sentAfter, sentGen, fromPoll: true });
       } catch (e) {
+        // A request the superseded generation sent out must never write
+        // this one off the air: its refusal, its unparseable answer, even
+        // its truncated body all describe the dead gateway, not the one
+        // now in charge. Failures of the CURRENT generation count as they
+        // always did.
+        if (sentGen !== this.traceGen) continue;
         this.failCount = (this.failCount || 0) + 1;
         if (!this.routes.size || this.failCount >= 3) {
           this.offline = `Remote trace error: ${String(e).slice(0, 240)}`;
@@ -1318,6 +1354,10 @@ export default class Routing extends View {
     const keepDone = Math.max(0, 60 - (this.routes.size - removable.length));
     for (const id of removable.slice(0, Math.max(0, removable.length - keepDone))) {
       this.routes.delete(id);
+      this.routeDoneAt.delete(id);
+    }
+    for (const id of this.routeDoneAt.keys()) {
+      if (!this.routes.has(id)) this.routeDoneAt.delete(id);
     }
   }
 
@@ -1956,6 +1996,11 @@ export default class Routing extends View {
       if (r?.code === 0) {
         this.activeProfile = name;
         this.profileMenuOpen = false;
+        // the rewrite this switch just performed invalidates any agent menu
+        // opened while it ran: its model/effort rows describe the config
+        // from before the rewrite, so it closes rather than turning stale
+        // entries clickable again the moment the lock releases
+        if (this.agentMenu) { this.agentMenu = null; this.agentMenuGen += 1; }
         notify({ title: "Magpie Profile", level: "success", timeout: 4000, body: `Switched to ${name}` });
       } else {
         // stderr carries the profile's file paths and model ids; masked
@@ -2192,7 +2237,13 @@ export default class Routing extends View {
       hist.push({ ts: now, left });
       if (hist.length > 120) hist = hist.slice(-120);
       this.quotaHistory.set(provId, hist);
-      this.maybeAlertQuota(provId, provLabel(group.name || provId), left, now);
+      // a provider whose own label carries an account address (@) must not
+      // show it in a masked notification either: the class falls back to a
+      // bare "Provider", exactly like the request-failure alerts. Internal
+      // keys, cooldowns and the Shown panel text keep the real id as-is.
+      const groupName = provLabel(group.name || provId);
+      const displayName = this.masked && groupName.includes("@") ? "Provider" : groupName;
+      this.maybeAlertQuota(provId, displayName, left, now);
     }
     // a provider missing from a valid snapshot has been removed from the
     // gateway: its burn-rate history and its alert tier go with it, so a
@@ -2258,7 +2309,15 @@ export default class Routing extends View {
     // out of the notification — and a provider string that itself carries
     // an account address (@) never stands in for the class either. The
     // cooldown key still uses seat.key, which never leaves the process.
-    const maskedProvider = safeProvider.includes("@")
+    // an account name is no provider class either: when the provider string
+    // IS the try's name or account address (same letters, any casing), it
+    // leaks exactly what masked mode hides and the clean try-provider class
+    // stands in — or nothing, when even that carries an address
+    const tryNameLc = String(lastTry?.name || "").toLowerCase();
+    const tryWhoLc = String(lastTry?.who || "").toLowerCase();
+    const spLc = safeProvider.toLowerCase();
+    const isAcctName = Boolean(spLc) && (spLc === tryNameLc || spLc === tryWhoLc);
+    const maskedProvider = (safeProvider.includes("@") || isAcctName)
       ? provLabel(lastTry?.provider || tryMeta?.provider || "")
       : safeProvider;
     const acct = this.masked
@@ -2290,8 +2349,14 @@ export default class Routing extends View {
     let recentErr = false;
     for (const r of this.routes.values()) {
       if (!r.done) { active += 1; continue; }
+      // the row scan reads the same first-observation-capped completion time
+      // the eviction memory keeps, so a surviving row and an evicted one
+      // under a fast remote clock expire at the same local instant; rows
+      // that never passed through applyTraceSnapshot fall back to the raw
+      // computed time, which for them is all there is
       const startedAt = r.time ? Date.parse(r.time) : NaN;
-      const finishedAt = Number.isFinite(startedAt) ? startedAt + Math.max(0, Number(r.ms) || 0) : NaN;
+      const rawFinishedAt = Number.isFinite(startedAt) ? startedAt + Math.max(0, Number(r.ms) || 0) : NaN;
+      const finishedAt = this.routeDoneAt.get(r.id) ?? rawFinishedAt;
       if (r.status >= 400 && Number.isFinite(finishedAt) && (now - finishedAt) < 5 * 60 * 1000) {
         recentErr = true;
       }

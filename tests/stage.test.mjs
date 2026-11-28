@@ -532,10 +532,10 @@ test("two-line request rows render route badge on line 1, live telemetry phases 
     const narrowRow4 = [...line1of(4), ...line2of(4)];
     const narrowRow5 = [...line1of(5), ...line2of(5)];
 
-    // Row 1 as the representative full-row assertion; rows 2/3/5 assert the
-    // same text at W=320 and are covered field-by-field in the loops below —
-    // repeating their identical arrays here asserted nothing the first pass didn't
     assert.deepEqual(narrowRow1, ["mods/routing/icons/codex-color.png", "Codex", "→", "Codex", "gpt-6.2-sol", t1, "Waiting", "· 146k in", "5s"]);
+    assert.deepEqual(narrowRow2, ["mods/routing/icons/codex-color.png", "Codex", "→", "Codex", "gpt-6.2-sol", t2, "Thinking", "· 146k in", "18s"]);
+    assert.deepEqual(narrowRow3, ["mods/routing/icons/codex-color.png", "Codex", "→", "Codex", "gpt-6.2-sol", t3, "Streaming", "· 146k in · ~4.1k out", "31s"],
+      "the streaming row's output-token text survives verbatim at W=246");
 
     assert.equal(narrowRow4[0], "mods/routing/icons/antigravity-color.png");
     assert.equal(narrowRow4[1], "Agy");
@@ -1290,6 +1290,8 @@ test("masked privacy redacts quota errors and error notifications, and fetchQuot
     await assert.rejects(q1, /gateway temporarily down/);
     await assert.rejects(q2, /gateway temporarily down/);
     assert.equal(quotaCalls, 1);
+    assert.ok(o.quotas.codex, "a failed quota request never discards the last readings");
+    assert.equal(m.shared.get("routing.status").lowQuota, true, "the shared low-quota flag survives a failed refresh too");
 
     // refreshAll with seq rollback (5 < 10) clears stale routes & notifiedErrors and notifies once with masked target
     o.routes.set(1, { id: 1, done: true, status: 200 });
@@ -1343,6 +1345,18 @@ test("masked privacy redacts quota errors and error notifications, and fetchQuot
     o.masked = false;
     const unmaskedCard = texts(find(o.render(m.cx), "quota-hover-card")).join(" ");
     assert.match(unmaskedCard, /403 forbidden for secret@corp\.com/);
+
+    // a masked provider whose own label carries an account address never
+    // shows it in a quota notification either: the title falls back to a
+    // bare "Provider" while the internal key and cooldown keep the real id
+    o.masked = true;
+    o.quotas = { acme: { name: "secret@corp.com", accounts: [{ allow: [{ label: "5h", left: 8 }] }] } };
+    const quotaNotes = m.notes.length;
+    o.recordQuotaTelemetry(now);
+    assert.equal(m.notes.length, quotaNotes + 1, "the low-quota alert still fires");
+    assert.equal(m.notes[m.notes.length - 1].title.includes("@"), false, "no account address in the masked quota alert");
+    assert.match(m.notes[m.notes.length - 1].title, /Low Quota: Provider/, "the masked quota alert falls back to a bare provider class");
+    assert.ok(o.prevQuotaTier.has("acme"), "the internal provider key is unchanged");
   } finally {
     Date.now = realNow;
   }
@@ -1722,6 +1736,31 @@ test("initTarget treats a missing config.json as default-local, strips a BOM, an
   await oMiss.initTarget(mMiss.cx);
   assert.equal(oMiss.configError, false, "a not-found spelling without a code is still an unconfigured install");
   assert.equal(oMiss.cliControlState().writable, true);
+
+  // a structured code is never overridden by the message: an EACCES whose
+  // path spells "not found" is still a broken install, not an absent file
+  const mAccPath = await loadMod({ home: tmpdir("accpathcfg"), exec: async () => ({ code: 0, stdout: "" }) });
+  mAccPath.env.readTextFile = async () => { const e = new Error("EACCES: permission denied, open '/home/x/not found/config.json'"); e.code = "EACCES"; throw e; };
+  const oAccPath = mAccPath.make({ offline: "" });
+  await oAccPath.initTarget(mAccPath.cx);
+  assert.equal(oAccPath.configError, true, "EACCES stays a broken install even when its path spells 'not found'");
+  assert.equal(oAccPath.cliControlState().writable, false);
+
+  // 6. A config that parses but is no object ([] parses fine) is no config
+  //    either: CLI controls off, no default-local magpie probed
+  const arrHome = tmpdir("arrcfg");
+  fs.mkdirSync(path.join(arrHome, "mods/routing"), { recursive: true });
+  fs.writeFileSync(path.join(arrHome, "mods/routing/config.json"), "[]");
+  const arrLog = [];
+  const mArr = await loadMod({
+    home: arrHome,
+    exec: async (_cmd, args) => { arrLog.push(args.join(" ")); return { code: 0, stdout: "" }; },
+  });
+  const oArr = mArr.make({ offline: "" });
+  await oArr.initTarget(mArr.cx);
+  assert.equal(oArr.configError, true, "a JSON array is no config either");
+  assert.equal(oArr.cliControlState().writable, false);
+  assert.ok(!arrLog.some((s) => s.includes("profiles")), "a non-object config never triggers local profile loading");
 });
 
 test("applyProfile and per-agent writes reject each other while parallel writes of different agents still run", async () => {
@@ -1784,6 +1823,35 @@ test("applyProfile and per-agent writes reject each other while parallel writes 
   release("profile");
   await profP;
   assert.equal(o.profileBusy, "");
+
+  // a redraw notification that throws once must never jam the locks: the
+  // profile switch, the model write and the effort write each hand their
+  // lock back in their finally, whatever the panel's notify did
+  const mLock = await loadMod({ home: ROOT, exec: async () => ({ code: 0, stdout: "" }) });
+  const ol = mLock.make({ loaded: true, offline: "", configReady: true });
+  let armed = true;
+  const origNotify = mLock.cx.notify;
+  mLock.cx.notify = () => { if (armed) { armed = false; throw new Error("redraw exploded"); } origNotify(); };
+  await ol.applyProfile("Saver", mLock.cx);
+  assert.equal(ol.profileBusy, "", "a throwing notify never jams the profile lock");
+  armed = true;
+  await ol.setAgentModel("claude", "claude/sonnet", mLock.cx);
+  assert.equal(ol.agentWrites.size, 0, "a throwing notify never jams the model-write lock");
+  armed = true;
+  await ol.setAgentEffort("claude", "low", mLock.cx);
+  assert.equal(ol.agentWrites.size, 0, "a throwing notify never jams the effort-write lock");
+
+  // a profile switch that lands while an agent menu is open closes that menu
+  // for good: its rows describe the config from before the rewrite, so it is
+  // invalidated rather than left to turn stale entries clickable again
+  const mInv = await loadMod({ home: ROOT, exec: async () => ({ code: 0, stdout: "" }) });
+  const oi = mInv.make({ loaded: true, offline: "", configReady: true });
+  oi.agentMenu = { cliAgent: "claude", busy: "", error: "", gen: oi.agentMenuGen };
+  const genBefore = oi.agentMenuGen;
+  await oi.applyProfile("Saver", mInv.cx);
+  assert.equal(oi.activeProfile, "Saver", "the profile switch itself succeeds");
+  assert.equal(oi.agentMenu, null, "an open agent menu is closed by the profile rewrite");
+  assert.ok(oi.agentMenuGen > genBefore, "the menu generation is invalidated with it");
 });
 
 test("masked applyProfile failures never leak stderr or exception text, only a classed summary", async () => {
@@ -2050,6 +2118,24 @@ test("masked error notifications name only the provider class and HTTP reason, n
   assert.equal(m.notes.length, 4);
   assert.equal(m.notes[3].body.includes("@"), false, "no address-bearing fallback survives either");
   assert.match(m.notes[3].body, /Codex → provider \(500 Server Error\)/, "the bare provider class is the last resort");
+
+  // a provider string that IS the try's account name (any casing) is no
+  // provider class either: the clean try-provider class stands in —
+  // "WorkAcct" itself never reaches the notification
+  const o3 = m.make({ loaded: true, offline: "" });
+  o3.masked = true;
+  o3.maybeAlertError({
+    id: 305,
+    agent: "codex",
+    provider: "workacct",
+    done: true,
+    status: 500,
+    tries: [{ id: "acct-10", name: "WorkAcct", who: "secret@corp.com", provider: "anthropic", done: true, status: 500 }],
+  }, now + 600_000);
+  assert.equal(m.notes.length, 5);
+  assert.equal(m.notes[4].body.includes("WorkAcct"), false, "the account-named provider never reaches the masked notification");
+  assert.equal(m.notes[4].body.includes("workacct"), false, "not in any casing either");
+  assert.match(m.notes[4].body, /Codex → anthropic \(500 Server Error\)/, "the clean try-provider class stands in for the account-named provider");
 });
 
 test("cross-restart trace replies through the real refresh path: adoption resets once, stale generations never apply", async () => {
@@ -2139,6 +2225,59 @@ test("cross-restart trace replies through the real refresh path: adoption resets
   assert.equal(o.seq, 4, "routine same-generation updates apply immediately");
   assert.equal(o.traceGen, 2);
   assert.ok(o.routes.has(71));
+
+  // The production overlap in full: a long-poll request of the old generation
+  // is genuinely still in flight when refreshAll adopts the new gateway. Its
+  // late answer — non-trace, unparseable, or a refusal — describes the dead
+  // process and must never take the live one off the air.
+  const pending = [];
+  let pollError = null;
+  const m2 = await loadMod({
+    home: ROOT,
+    exec: async (_cmd, args) => {
+      const u = args.find((x) => String(x).includes("http://")) || "";
+      if (u.includes("/quotas")) return { code: 0, stdout: JSON.stringify({ data: [] }) };
+      if (u.includes("wait=1")) {
+        await new Promise((res) => pending.push(res));
+        if (pollError) throw new Error(pollError);
+        return { code: 0, stdout: JSON.stringify({ error: { message: "old gateway gone" } }) };
+      }
+      return { code: 0, stdout: JSON.stringify(tracePayload) };
+    },
+  });
+  const op = m2.make({ loaded: true, offline: "", seq: 49, pid: 100 });
+  void op.poll(m2.cx);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(pending.length, 1, "the long-poll request of generation 0 is genuinely in flight");
+
+  // the restart lands through the real refresh path while the poll hangs
+  tracePayload = tr(200, 10, [doneRoute(90)], [90]);
+  await op.refreshAll(m2.cx);
+  assert.equal(op.traceGen, 1, "the new process is adopted while the old poll is still out");
+  assert.ok(op.routes.has(90), "the live gateway's routes are applied");
+  assert.equal(op.loaded, true);
+  assert.equal(op.offline, "");
+
+  // the stale poll answers with a non-trace error body: dropped outright —
+  // the live gateway is not written offline, its rows are not cleared, no
+  // offline flag reaches the shared status
+  pending.splice(0).forEach((res) => res());
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(op.offline, "", "a stale-generation non-trace reply never takes the new gateway offline");
+  assert.equal(op.loaded, true, "the live stage stays loaded");
+  assert.ok(op.routes.has(90), "the live routes survive the stale reply");
+  assert.notEqual(m2.shared.get("routing.status")?.offline, true, "no offline flag is published for a dead generation's failure");
+
+  // a stale REFUSAL (the dead process is unreachable) is dropped the same way
+  pollError = "old gateway unreachable";
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(pending.length >= 1, "the poll loop re-armed after the dropped non-trace answer");
+  pending.splice(0).forEach((res) => res());
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(op.offline, "", "a stale-generation refusal never takes the new gateway offline either");
+  assert.equal(op.loaded, true);
+  assert.ok(op.routes.has(90));
+  pollError = null;
 });
 
 test("recentErr survives history eviction via the remembered completion time and resets on generation change", async () => {
@@ -2157,7 +2296,7 @@ test("recentErr survives history eviction via the remembered completion time and
         time: new Date(now - 90 * 1000).toISOString(), ms: 30 * 1000, // finished 60s ago
         tries: [{ id: "s1", done: true, status: 500 }],
       }],
-    }, m.cx, { sentAfter: 0, sentPid: 100, sentGen: 0 });
+    }, m.cx, { sentAfter: 0, sentGen: 0 });
     assert.ok(o.lastErrorDoneAt > 0, "the failure's completion time is remembered");
 
     // 62 newer successful requests fill the history past its cap. The rows
@@ -2165,12 +2304,15 @@ test("recentErr survives history eviction via the remembered completion time and
     // flying rows whatever the count — so the flights are run out the way
     // the frame timer runs them, and the eviction then happens inside the
     // snapshots' own trimRoutes pass: no manual delete, no bare clear.
-    for (let i = 2; i <= 63; i++) {
-      for (const [fid, f] of o.flights) {
-        for (let k = 0; k < 20 && f.state !== "gone"; k++) o.advance(f, now + 999999 + k * 1000);
-        if (f.state === "gone") o.flights.delete(fid);
+    const landAndTrim = (inst) => {
+      for (const [fid, f] of inst.flights) {
+        for (let k = 0; k < 20 && f.state !== "gone"; k++) inst.advance(f, now + 999999 + k * 1000);
+        if (f.state === "gone") inst.flights.delete(fid);
       }
-      o.trimRoutes();
+      inst.trimRoutes();
+    };
+    for (let i = 2; i <= 63; i++) {
+      landAndTrim(o);
       o.applyTraceSnapshot({
         object: "trace", pid: 100, seq: 5 + i, ids: [i],
         routes: [{ id: i, agent: "codex", done: true, status: 200, time: new Date(now).toISOString(), ms: 100, tries: [{ id: `s${i}`, done: true, status: 200 }] }],
@@ -2208,29 +2350,49 @@ test("recentErr survives history eviction via the remembered completion time and
     now = Date.parse("2026-11-28T08:00:00Z") + 60 * 1000;
     const o3 = m.make({ loaded: true, offline: "", seq: 0, pid: 100 });
     const futureDone = now + 7 * 60 * 1000; // finish lands 7m in the local future
-    const snap = {
-      object: "trace", pid: 100, seq: 0, ids: [], routes: [],
-    };
-    for (let i = 1; i <= 62; i++) {
-      for (const [fid, f] of o3.flights) {
-        for (let k = 0; k < 20 && f.state !== "gone"; k++) o3.advance(f, now + 999999 + k * 1000);
-        if (f.state === "gone") o3.flights.delete(fid);
-      }
-      o3.trimRoutes();
-      snap.seq = i;
-      snap.ids = [i];
-      snap.routes = [i === 1
-        ? {
-          id: 1, agent: "codex", done: true, status: 500,
-          time: new Date(futureDone - 1000).toISOString(), ms: 1000,
-          tries: [{ id: "s1", done: true, status: 500 }],
-        }
-        : { id: i, agent: "codex", done: true, status: 200, time: new Date(now).toISOString(), ms: 100, tries: [{ id: `s${i}`, done: true, status: 200 }] }];
-      o3.applyTraceSnapshot({ ...snap, routes: snap.routes.map((x) => ({ ...x })) }, m.cx, { sentAfter: i - 1, sentGen: 0 });
-    }
-    assert.equal(o3.lastErrorDoneAt, now, "a future completion time is clamped to the panel's own clock");
-    assert.equal(o3.routes.has(1), false, "the failed row is evicted by the real cap path here too");
+    const o3Now = now;
+    o3.applyTraceSnapshot({
+      object: "trace", pid: 100, seq: 1, ids: [1],
+      routes: [{
+        id: 1, agent: "codex", done: true, status: 500,
+        time: new Date(futureDone - 1000).toISOString(), ms: 1000,
+        tries: [{ id: "s1", done: true, status: 500 }],
+      }],
+    }, m.cx, { sentAfter: 0, sentGen: 0 });
+    assert.equal(o3.lastErrorDoneAt, o3Now, "a future completion time is clamped to the panel's own clock");
+
+    // the SAME failure seen again later must not push the remembered time
+    // forward: repeat sightings never re-clamp, or the red dot would live forever
+    now += 2 * 60 * 1000;
+    o3.applyTraceSnapshot({
+      object: "trace", pid: 100, seq: 2, ids: [1],
+      routes: [{
+        id: 1, agent: "codex", done: true, status: 500,
+        time: new Date(futureDone - 1000).toISOString(), ms: 1000,
+        tries: [{ id: "s1", done: true, status: 500 }],
+      }],
+    }, m.cx, { sentAfter: 1, sentGen: 0 });
+    assert.equal(o3.lastErrorDoneAt, o3Now, "a repeat sighting never renews the failure's completion time");
+    now = o3Now;
+
+    // before any eviction: the row is still in the history, yet its scan
+    // reads the same first-observation-capped time the memory keeps, so it
+    // too expires five minutes after the LOCAL completion — never after the
+    // remote clock's
     o3.quotas = {};
+    o3.syncSharedStatus(o3Now + 5 * 60 * 1000 + 1);
+    assert.equal(m.shared.get("routing.status").recentErr, false,
+      "even while the failed row survives, the dot expires at the clamped local five minutes");
+
+    // now fill the history past its cap so the failure's row is evicted
+    for (let i = 2; i <= 62; i++) {
+      landAndTrim(o3);
+      o3.applyTraceSnapshot({
+        object: "trace", pid: 100, seq: 1 + i, ids: [i],
+        routes: [{ id: i, agent: "codex", done: true, status: 200, time: new Date(now).toISOString(), ms: 100, tries: [{ id: `s${i}`, done: true, status: 200 }] }],
+      }, m.cx, { sentAfter: i, sentGen: 0 });
+    }
+    assert.equal(o3.routes.has(1), false, "the failed row is evicted by the real cap path here too");
     now += 5 * 60 * 1000 + 1; // just past the clamped five minutes
     o3.syncSharedStatus(now);
     assert.equal(m.shared.get("routing.status").recentErr, false,
